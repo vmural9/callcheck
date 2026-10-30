@@ -3,7 +3,8 @@
 ``FormStore`` backs the agent's two tools, ``save_field`` and ``submit_form``, and reports
 what it captured so the harness can compare it with what the caller said. The reference agent
 exists to be evaluated, so the store ships with three deliberately planted bugs, each switched
-on by name in ``BUGS``. They are not accidents; the README shows the harness catching them:
+on by name in ``BUGS``. They are not accidents; they are what the harness is built to catch
+(the README sample shows one of them, ``day_month_swap``, caught):
 
 * ``ignore_corrections``: a second ``save_field`` for a field already saved is dropped, though
   the tool still reports success, so the caller's correction never reaches the form.

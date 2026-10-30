@@ -352,8 +352,8 @@ Differences from the AWS sample code (written for an earlier release):
    client audio or interactive content, with a `ValidationException` on the output stream.
 4. To make the model speak first, send a USER text turn (`interactive:true`), e.g.
    `(call connected)`, after the open handshake, and keep audio frames (silence will do)
-   flowing: it replied about 0.5 s after audio began, and not at all without audio. A text turn in the
-   middle of a session works the same way.
+   flowing: it replied about 0.5 s after audio began; with no audio flowing it said nothing for the 5 s
+   observed (Task 15, section 8). A text turn in the middle of a session works the same way.
 5. Read events by their single key under `event`. Build the transcript from `textOutput` by
    `role` of the owning `contentStart` (look it up by `contentId`); keep `FINAL` stage text for the
    transcript, but drop any TEXT block whose `contentEnd` has `stopReason: "INTERRUPTED"` (it

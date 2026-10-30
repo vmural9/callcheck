@@ -6,7 +6,7 @@ caller_goal: >
   using your fact sheet. When the agent confirms the form is complete, say goodbye.
 fields:
   - name: first_name
-    type: name            # a person's name, compared by sound as well as spelling
+    type: name            # a person's name, compared by text similarity, after normalising case and punctuation
     expected: Maria
   - name: last_name
     type: name

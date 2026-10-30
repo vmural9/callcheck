@@ -1,4 +1,4 @@
-"""Live check: Claude on Bedrock returns schema-shaped JSON through a forced tool call."""
+"""Live check: Claude on Bedrock returns schema-shaped JSON through an auto-choice tool call."""
 
 import os
 

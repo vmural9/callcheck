@@ -144,18 +144,33 @@ class ScriptedStream:
     ``completionEnd`` and ends, unless ``ignore_close`` makes it hang instead.
     """
 
-    def __init__(self, script: list[str | Exception | None], *, ignore_close: bool = False):
-        """Queue the scripted server events."""
+    def __init__(
+        self,
+        script: list[str | Exception | None],
+        *,
+        ignore_close: bool = False,
+        fail_on: str | None = None,
+    ):
+        """Queue the scripted server events; sending an event named ``fail_on`` raises."""
         self._script = list(script)
         self._ignore_close = ignore_close
+        self._fail_on = fail_on
         self._input_closed = asyncio.Event()
         self._ending = [COMPLETION_END, None]
         self.sent: list[dict] = []
-        self.closed = False
+        self.close_calls = 0
+
+    @property
+    def closed(self) -> bool:
+        """Tell whether the client closed its input."""
+        return self.close_calls > 0
 
     async def send(self, event_json: str) -> None:
-        """Record one client event."""
-        self.sent.append(json.loads(event_json)["event"])
+        """Record one client event, or fail if it is the ``fail_on`` event."""
+        event = json.loads(event_json)["event"]
+        if self._fail_on in event:
+            raise ConnectionError(f"cannot send {self._fail_on}")
+        self.sent.append(event)
 
     async def receive(self) -> str | None:
         """Return the next scripted server event."""
@@ -172,7 +187,7 @@ class ScriptedStream:
 
     async def close(self) -> None:
         """Mark the client's input as finished."""
-        self.closed = True
+        self.close_calls += 1
         self._input_closed.set()
 
     def names(self) -> list[str]:
@@ -492,13 +507,50 @@ async def test_usage_event_carries_the_provider_usage_payload():
 
 async def test_stream_failure_emits_an_unrecoverable_error_then_closed():
     failure = RuntimeError("Timed out waiting for audio bytes or interactive content.")
-    events = await run_to_end(session(ScriptedStream([out("usageEvent", **USAGE), failure])))
+    stream = ScriptedStream([out("usageEvent", **USAGE), failure])
+    s = session(stream)
+    events = await run_to_end(s)
     assert kinds(events) == ["usage", "error", "closed"]
     assert events[1].payload["recoverable"] is False
     assert "Timed out waiting" in events[1].payload["message"]
+    await s.close()
+    assert stream.close_calls == 1
+    assert "promptEnd" not in stream.names()
 
 
-async def test_stream_failure_mid_reply_still_ends_the_turn():
+async def test_server_ending_on_its_own_still_gets_its_stream_closed():
+    stream = ScriptedStream([*spoken_reply("r1", "Goodbye.", [b"\x00\x00"]), None])
+    s = session(stream)
+    assert kinds(await run_to_end(s))[-1] == "closed"
+    await s.close()
+    await s.close()
+    assert stream.close_calls == 1
+    assert "sessionEnd" not in stream.names()
+
+
+async def test_failed_end_sequence_still_closes_the_stream():
+    stream = ScriptedStream([], fail_on="promptEnd")
+    s = session(stream)
+    await s.start()
+    await s.close()
+    events = [ev async for ev in s.events()]
+    assert kinds(events) == ["error", "closed"]
+    assert events[0].payload["recoverable"] is True
+    assert "cannot send promptEnd" in events[0].payload["message"]
+    assert stream.close_calls == 1
+
+
+async def test_failed_start_still_closes_the_stream():
+    stream = ScriptedStream([], fail_on="promptStart")
+    s = session(stream)
+    with pytest.raises(ConnectionError):
+        await s.start()
+    await s.close()
+    assert stream.close_calls == 1
+    assert kinds([ev async for ev in s.events()]) == ["closed"]
+
+
+async def test_stream_ending_cleanly_mid_reply_still_ends_the_turn():
     script = [*text_block("a", "ASSISTANT", "SPECULATIVE", "Hi.", "PARTIAL_TURN"), None]
     events = await run_to_end(session(ScriptedStream(script)))
     assert kinds(events) == ["turn_start", "transcript", "turn_end", "closed"]
@@ -512,6 +564,7 @@ async def test_closed_is_emitted_once_on_stream_end_and_double_close():
     await s.close()
     assert [ev async for ev in s.events()] == []
     assert "promptEnd" not in stream.names()
+    assert stream.close_calls == 1
 
 
 async def test_close_sends_the_end_sequence_and_waits_for_the_server_to_finish():
@@ -523,7 +576,7 @@ async def test_close_sends_the_end_sequence_and_waits_for_the_server_to_finish()
     assert stream.names()[-3:] == ["contentEnd", "promptEnd", "sessionEnd"]
     audio_name = stream.bodies("contentStart")[1]["contentName"]
     assert stream.sent[-3]["contentEnd"]["contentName"] == audio_name
-    assert stream.closed
+    assert stream.close_calls == 1
     assert kinds([ev async for ev in s.events()]) == ["closed"]
     sent = len(stream.sent)
     await s.send_audio(b"\x00" * 640)

@@ -202,17 +202,32 @@ class NovaSonicSession:
                 return
 
     async def close(self) -> None:
-        """End the session cleanly, waiting briefly for the server to finish; idempotent."""
+        """End the session and release the stream on every path; idempotent.
+
+        While the server is still sending, the end sequence goes first (best effort) and
+        the server is given a moment to finish. The stream is closed exactly once, whether
+        the session ended cleanly, failed, or never finished starting.
+        """
         if self._closing:
             return
         self._closing = True
-        if self._stream is not None and self._reader is not None and not self._reader.done():
+        if self._stream is not None:
+            live = self._reader is not None and not self._reader.done()
+            if live:
+                try:
+                    await self._send(self._closing_events(), always=True)
+                except Exception as exc:
+                    self._emit(
+                        "error", message=f"Nova Sonic end sequence failed: {exc}", recoverable=True
+                    )
             try:
-                await self._send(self._closing_events(), always=True)
                 await self._stream.close()
             except Exception as exc:
-                self._emit("error", message=f"Nova Sonic close failed: {exc}", recoverable=True)
-            await self._await_reader()
+                self._emit(
+                    "error", message=f"Nova Sonic stream close failed: {exc}", recoverable=True
+                )
+            if live:
+                await self._await_reader()
         self._finish()
 
     def _accepts_input(self) -> bool:
@@ -424,8 +439,9 @@ class NovaSonicSession:
     # Event queue
 
     def _emit(self, kind: str, **payload: object) -> None:
-        """Queue an event on this session's side."""
-        self._queue.put_nowait(endpoint_event(self._side, kind, **payload))
+        """Queue an event on this session's side; nothing follows ``closed``."""
+        if not self._finished:
+            self._queue.put_nowait(endpoint_event(self._side, kind, **payload))
 
     def _end_turn(self) -> None:
         """Emit ``turn_end`` if the assistant is mid-reply."""
@@ -436,9 +452,9 @@ class NovaSonicSession:
     def _finish(self) -> None:
         """Close any open turn and emit ``closed``, once."""
         if not self._finished:
-            self._finished = True
             self._end_turn()
             self._emit("closed")
+            self._finished = True
 
 
 class _BedrockStream:

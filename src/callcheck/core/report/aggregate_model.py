@@ -78,6 +78,7 @@ class CostSummary(BaseModel):
     total_usd: float | None
     total_partial: bool = False
     unverified: bool = False
+    retried_attempts: int = 0
 
 
 class BatchSummary(BaseModel):

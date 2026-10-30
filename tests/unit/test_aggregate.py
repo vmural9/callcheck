@@ -70,6 +70,7 @@ def make_run(
     incidents=(),
     ttfa=(1000.0,),
     cost="default",
+    reason="caller_done",
 ):
     run = batch / name
     run.mkdir(parents=True)
@@ -96,7 +97,7 @@ def make_run(
     (run / "judge.json").write_text(judge.model_dump_json(), encoding="utf-8")
     (run / "metrics.json").write_text(metrics.model_dump_json(), encoding="utf-8")
     (run / "outcome.json").write_text(
-        json.dumps({"reason": "caller_done", "duration_ms": 9000}), encoding="utf-8"
+        json.dumps({"reason": reason, "duration_ms": 9000}), encoding="utf-8"
     )
     return run
 
@@ -327,3 +328,37 @@ def test_artifact_runs_leave_field_accuracy_but_keep_failure_types(tmp_path):
     md = render_batch_report(summarize_batch(batch))
     assert "| date | 1/1 (100%) | - |" in md
     assert "| no_response | 1 | [a-2](a-2/transcript.md) |" in md
+
+
+def test_crashed_runs_leave_field_accuracy(tmp_path):
+    batch = _batch(tmp_path)
+    make_run(batch, "a-1", "pass", fields=[_field(verdict="match")])
+    make_run(
+        batch,
+        "a-2",
+        "undetermined",
+        fields=[_field(verdict="missing", captured=None)],
+        reason="error",
+    )
+    md = render_batch_report(summarize_batch(batch))
+    assert "| date | 1/1 (100%) | - |" in md
+
+
+def test_retried_attempts_count_in_the_cost_totals(tmp_path):
+    batch = _batch(tmp_path)
+    make_run(batch, "a-1", cost=_cost())
+    make_run(batch, "a-1.attempt1", cost=_cost())
+    (batch / "a-2.attempt1").mkdir()  # no metrics.json: nothing to count
+    summary = summarize_batch(batch)
+    assert summary.n == 1 and summary.cost.retried_attempts == 1
+    md = render_batch_report(summary)
+    assert "| agent | $0.20 | $0.10 |" in md
+    assert "- Total cost: $0.34" in md
+    assert "Includes 1 retried attempt." in md
+
+
+def test_no_retried_attempts_leaves_the_cost_section_unchanged(tmp_path):
+    batch = _batch(tmp_path)
+    make_run(batch, "a-1", cost=_cost())
+    md = render_batch_report(summarize_batch(batch))
+    assert "retried" not in md

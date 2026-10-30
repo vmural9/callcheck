@@ -130,6 +130,9 @@ def _cost(s: BatchSummary) -> list[str]:
         notes.append(PARTIAL_NOTE)
     if s.cost.unverified:
         notes.append(UNVERIFIED_NOTE)
+    if s.cost.retried_attempts:
+        n = s.cost.retried_attempts
+        notes.append(f"Includes {n} retried attempt{'' if n == 1 else 's'}.")
     return [*lines, "", *notes] if notes else lines
 
 

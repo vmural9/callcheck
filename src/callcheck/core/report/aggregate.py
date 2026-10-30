@@ -4,8 +4,8 @@
 ``outcome.json`` and ``incidents.json`` and gathers them into a ``BatchSummary``.
 A run directory without a readable ``judge.json`` counts as errored: it is listed
 with its error and kept out of the pass rate. ``preflight/`` and ``*.attempt1``
-directories (a retried first attempt) are not runs. Rendering lives in
-``aggregate_render``.
+directories (a retried first attempt) are not runs, but their cost is in the batch totals.
+Rendering lives in ``aggregate_render``.
 """
 
 import json
@@ -48,6 +48,7 @@ class _Run(BaseModel):
     metrics: Metrics | None
     incidents: list[Incident]
     error: str | None
+    outcome_reason: str | None = None
 
 
 def _read_json(path: Path) -> object | None:
@@ -99,6 +100,7 @@ def _load_run(run_dir: Path) -> _Run:
         metrics=_read_metrics(run_dir / "metrics.json"),
         incidents=incidents if incidents is not None else (judge.incidents if judge else []),
         error=error,
+        outcome_reason=outcome.get("reason"),
     )
 
 
@@ -138,12 +140,15 @@ def _failures(judged: list[_Run]) -> list[FailureRow]:
 
 
 def _fields(judged: list[_Run]) -> list[FieldRow]:
-    """Tally field matches over judged runs; artifact runs are left out.
+    """Tally field matches over judged runs; artifact and crashed runs are left out.
 
-    An artifact call ended because of the simulator, so what the agent captured in it says
-    nothing about the agent. Their failure types still count under "Failures by type".
+    An artifact call ended because of the simulator, and a crashed call (outcome ``error``)
+    ended because of the harness, so what the agent captured in either says nothing about the
+    agent. Their failure types still count under "Failures by type".
     """
-    judged = [run for run in judged if run.judge.verdict != "artifact"]
+    judged = [
+        run for run in judged if run.judge.verdict != "artifact" and run.outcome_reason != "error"
+    ]
     graded: Counter[str] = Counter()
     matched: Counter[str] = Counter()
     wrong: dict[str, Counter[str]] = {}
@@ -220,29 +225,50 @@ def _worst(rows: list[RunRow]) -> list[RunRow]:
     return judged[:3]
 
 
-def _cost(runs: list[_Run]) -> CostSummary:
-    """Sum the priced cost lines; a run that lacks one makes that row partial, not n/a."""
+def _retried_costs(batch_dir: Path) -> list[Cost | None]:
+    """Return the cost of each retried first attempt that has metrics (``None`` if unpriced).
+
+    A retried attempt's directory is not a run, but its money was spent.
+    """
+    metrics = (_read_metrics(p / "metrics.json") for p in sorted(batch_dir.glob("*.attempt1")))
+    return [m.cost for m in metrics if m is not None]
+
+
+def _cost(runs: list[_Run], retried: list[Cost | None]) -> CostSummary:
+    """Sum the priced cost lines; a run that lacks one makes that row partial, not n/a.
+
+    Retried attempts add to the totals but not to the per-run means.
+    """
     costs: list[Cost | None] = [run.metrics.cost if run.metrics else None for run in runs]
     rows = []
     for party in _PARTIES:
         lines = [getattr(c, party) if c else None for c in costs]
         priced = [line for line in lines if line is not None and line.usd is not None]
-        total = sum(line.usd for line in priced) if priced else None
+        extra = [getattr(c, party) if c else None for c in retried]
+        extra_priced = [line for line in extra if line is not None and line.usd is not None]
+        run_total = sum(line.usd for line in priced)
+        total = run_total + sum(line.usd for line in extra_priced)
         rows.append(
             CostRow(
                 party=party,
-                total_usd=total,
-                mean_usd=total / len(priced) if priced else None,
-                partial=len(priced) < len(lines) or any(line.partial for line in priced),
+                total_usd=total if priced or extra_priced else None,
+                mean_usd=run_total / len(priced) if priced else None,
+                partial=len(priced) < len(lines)
+                or len(extra_priced) < len(extra)
+                or any(line.partial for line in [*priced, *extra_priced]),
             )
         )
-    priced_totals = [c.total_usd for c in costs if c is not None and c.total_usd is not None]
+    everything = [*costs, *retried]
+    priced_totals = [c.total_usd for c in everything if c is not None and c.total_usd is not None]
     return CostSummary(
         rows=rows,
         total_usd=sum(priced_totals) if priced_totals else None,
-        total_partial=len(priced_totals) < len(costs)
-        or any(c is not None and c.partial for c in costs),
-        unverified=any(getattr(c, p).unverified for c in costs if c is not None for p in _PARTIES),
+        total_partial=len(priced_totals) < len(everything)
+        or any(c is not None and c.partial for c in everything),
+        unverified=any(
+            getattr(c, p).unverified for c in everything if c is not None for p in _PARTIES
+        ),
+        retried_attempts=len(retried),
     )
 
 
@@ -284,7 +310,7 @@ def summarize_batch(batch_dir: Path) -> BatchSummary:
         latency=_latency(runs),
         incidents=_incidents(runs),
         worst=_worst(rows),
-        cost=_cost(runs),
+        cost=_cost(runs, _retried_costs(batch_dir)),
     )
 
 

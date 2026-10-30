@@ -72,8 +72,8 @@ def test_volunteer_section():
 
 
 def test_off_topic_section():
-    plan = [OffTopic(after_field="phone", question="Is there parking at the clinic?")]
-    text = _plan_brief(off_topic=plan)
+    off_topic = [OffTopic(after_field="phone", question="Is there parking at the clinic?")]
+    text = _plan_brief(off_topic=off_topic)
     assert "After you answer your phone, ask: 'Is there parking at the clinic?'" in text
 
 

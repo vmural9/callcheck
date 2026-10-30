@@ -38,7 +38,7 @@ def _behaviour_sentences(persona: Persona) -> list[str]:
     if b.out_of_order > 0:
         sentences.append("You sometimes volunteer information before you are asked for it.")
     if b.off_topic > 0:
-        sentences.append("You sometimes ask an unrelated question before answering.")
+        sentences.append("You sometimes ask an unrelated question after answering.")
     if b.interrupts:
         sentences.append("You sometimes start talking before the other person has finished.")
     if b.verbosity == "terse":

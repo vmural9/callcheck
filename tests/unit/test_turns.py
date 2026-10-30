@@ -106,6 +106,7 @@ def test_stale_question_from_a_previous_turn_does_not_make_a_caller_stall():
     events = [
         ev(500, "agent", "transcript", role="agent", text="Anything else?", final=True),
         ev(1000, "agent", "turn_end"),
+        ev(2900, "agent", "turn_start"),
         ev(3000, "agent", "audio_start"),
         ev(4000, "agent", "turn_end"),
         ev(14000, "harness", "call_end"),
@@ -370,3 +371,51 @@ def test_write_incidents_saves_a_json_list(tmp_path):
     assert rows == [incident.model_dump()]
     write_incidents(tmp_path, [])
     assert json.loads((tmp_path / "incidents.json").read_text(encoding="utf-8")) == []
+
+
+def agent_question_turn_ending_early():
+    """An agent turn whose ``turn_end`` comes at 1 s although its audio plays on."""
+    return [
+        ev(0, "agent", "audio_start"),
+        ev(60, "agent", "speech_start"),
+        ev(500, "agent", "transcript", role="agent", text="What is your name?", final=True),
+        ev(1000, "agent", "turn_end"),
+    ]
+
+
+def test_trailing_audio_after_an_early_turn_end_is_not_silence():
+    events = [
+        *agent_question_turn_ending_early(),
+        ev(9000, "agent", "speech_end"),
+        *caller_turn(13000, 14000),
+        ev(14500, "agent", "audio_start"),
+        ev(14560, "agent", "speech_start"),
+        ev(16000, "harness", "call_end"),
+    ]
+    assert [i for i in detect(events) if i.label in ("dead_end", "caller_stall")] == []
+
+
+def test_silence_starts_after_the_last_trailing_audio_when_the_agent_pauses_in_it():
+    events = [
+        *agent_question_turn_ending_early(),
+        ev(2600, "agent", "speech_end"),
+        ev(3400, "agent", "speech_start"),
+        ev(5000, "agent", "speech_end"),
+        ev(15000, "harness", "call_end"),
+    ]
+    found = [i for i in detect(events) if i.label in ("dead_end", "caller_stall")]
+    assert [(i.label, i.t_ms) for i in found] == [("caller_stall", 5000)]
+
+
+def test_a_new_agent_turn_ends_the_silence_after_the_previous_one():
+    events = [
+        *agent_question_turn_ending_early(),
+        ev(2000, "agent", "speech_end"),
+        ev(8000, "agent", "turn_start"),
+        ev(8100, "agent", "audio_start"),
+        ev(9000, "agent", "speech_end"),
+        ev(9000, "agent", "turn_end"),
+        ev(20000, "harness", "call_end"),
+    ]
+    found = [(i.label, i.t_ms) for i in detect(events) if i.label in ("dead_end", "caller_stall")]
+    assert found == [("caller_stall", 2000), ("dead_end", 9000)]

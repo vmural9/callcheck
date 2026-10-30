@@ -259,14 +259,19 @@ class Call:
 
         The nudge runs as a task so a slow ``nudge()`` never holds up the 20 ms ticker;
         each tick first looks at whether the one in flight has finished. A refused nudge,
-        or a quiet spell after ``max_nudges`` nudges, ends the call as ``stalled``.
+        (including one that raises, which is also recorded as a recoverable error), or a quiet
+        spell after ``max_nudges`` nudges, ends the call as ``stalled``.
         """
         if self._monitor is None or self._done_at is not None:
             return None
         if self._nudge_task is not None:
             if not self._nudge_task.done():
                 return None
-            accepted = self._nudge_task.result()
+            try:
+                accepted = self._nudge_task.result()
+            except Exception as exc:
+                self._record("caller", "error", message=f"nudge failed: {exc}", recoverable=True)
+                accepted = False
             self._nudge_task = None
             if not accepted:
                 self._record("harness", "watchdog", reason="nudge_refused", label=self._nudge_label)

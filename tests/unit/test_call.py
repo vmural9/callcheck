@@ -469,3 +469,91 @@ async def test_a_healthy_monitored_call_is_never_nudged():
     ).run()
     assert outcome.reason == "caller_done"
     assert not of_kind(sink, "nudge") and not of_kind(sink, "watchdog")
+
+
+class RaisingNudgeCaller(FakeCaller):
+    """Fake caller whose nudge fails."""
+
+    async def nudge(self, instruction: str) -> bool:
+        """Raise instead of speaking."""
+        raise RuntimeError("nudge boom")
+
+
+async def test_a_nudge_that_raises_is_recorded_and_ends_the_call_as_refused():
+    channel = FakeChannel()
+    sink = ListSink()
+    outcome = await Call(
+        caller=RaisingNudgeCaller(channel, FORM_ANSWERS),
+        target=FakeTarget(channel, FORM_FIELDS, go_silent_after=2),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    ).run()
+    assert outcome.reason == "stalled"
+    [dog] = of_kind(sink, "watchdog")
+    assert dog.payload == {"reason": "nudge_refused", "label": "no_response"}
+    [err] = of_kind(sink, "error")
+    assert err.payload["recoverable"] is True and "nudge boom" in err.payload["message"]
+
+
+def agent_turn(text: str) -> list[CallEvent]:
+    """Script one agent turn: its words, 1.5 s of audio, then ``turn_end`` right away."""
+    return [
+        endpoint_event("agent", "turn_start"),
+        endpoint_event("agent", "transcript", role="agent", text=text, final=True),
+        *audio_frames("agent", 1500),
+        endpoint_event("agent", "turn_end"),
+    ]
+
+
+async def run_silent_caller_call(
+    target_events: list[CallEvent],
+) -> tuple[ListSink, list]:
+    """Run a call whose agent says its piece and whose caller never speaks; return its incidents."""
+    sink = ListSink()
+    await Call(
+        caller=ScriptedEndpoint([]),
+        target=ScriptedEndpoint(target_events),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    ).run()
+    return sink, detect_incidents(sink.events, CallConfig(), caller_interrupts_expected=False)
+
+
+async def test_a_statement_then_silence_is_a_dead_end_where_the_monitor_nudged():
+    sink, incidents = await run_silent_caller_call(agent_turn("One moment please."))
+    [nudge] = of_kind(sink, "nudge")
+    assert nudge.payload["label"] == "dead_end"
+    [found] = [i for i in incidents if i.label == "dead_end"]
+    assert found.attribution == "agent"
+    assert abs(nudge.t_ms - (found.t_ms + 6000)) <= 3 * FRAME_MS
+
+
+async def test_a_question_then_silence_is_a_caller_stall_where_the_monitor_nudged():
+    sink, incidents = await run_silent_caller_call(agent_turn("What is your name?"))
+    [nudge] = of_kind(sink, "nudge")
+    assert nudge.payload["label"] == "caller_stall"
+    [found] = [i for i in incidents if i.label == "caller_stall"]
+    assert found.attribution == "simulator"
+    assert abs(nudge.t_ms - (found.t_ms + 6000)) <= 3 * FRAME_MS
+
+
+async def test_a_fake_target_question_met_by_a_silent_caller_agrees_with_the_nudge():
+    channel = FakeChannel()
+    sink = ListSink()
+    await Call(
+        caller=FakeCaller(channel, FORM_ANSWERS, script=[], nudgeable=False),
+        target=FakeTarget(channel, FORM_FIELDS),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    ).run()
+    [nudge] = of_kind(sink, "nudge")
+    incidents = detect_incidents(sink.events, CallConfig(), caller_interrupts_expected=False)
+    [found] = [i for i in incidents if i.label == "caller_stall"]
+    assert nudge.payload["label"] == "caller_stall"
+    assert abs(nudge.t_ms - (found.t_ms + 6000)) <= 3 * FRAME_MS

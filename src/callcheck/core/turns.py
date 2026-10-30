@@ -185,27 +185,71 @@ def _agent_turn_ends(events: list[CallEvent]) -> list[tuple[float, float]]:
     return ends
 
 
+def _silence_window(
+    events: list[CallEvent], turn_end: float, caller_spans: list[Interval], horizon: float
+) -> Interval:
+    """Return when the quiet after an agent ``turn_end`` begins and ends.
+
+    It begins when the agent has stopped and any caller speech already under way has
+    finished. An agent that emits ``turn_end`` before its audio has played out keeps
+    sounding afterwards, so it begins no earlier than the agent's last ``speech_end``
+    before the quiet is broken. It ends at the caller's next ``speech_start`` or when a
+    new agent turn begins (agent audio after a fresh ``turn_start``); trailing audio of
+    the same turn does not end it.
+    """
+    start = max([turn_end, *(end for s, end in caller_spans if s < turn_end < end)])
+    new_turn_at = next(
+        (
+            e.t_ms
+            for e in events
+            if e.side == "agent" and e.kind == "turn_start" and e.t_ms > turn_end
+        ),
+        None,
+    )
+    new_turn = min(
+        (
+            e.t_ms
+            for e in events
+            if new_turn_at is not None
+            and e.side == "agent"
+            and e.kind in ("audio_start", "speech_start")
+            and e.t_ms >= new_turn_at
+        ),
+        default=horizon,
+    )
+    broken_at = min(
+        [
+            new_turn,
+            *(
+                e.t_ms
+                for e in events
+                if e.side == "caller" and e.kind == "speech_start" and e.t_ms > start
+            ),
+        ]
+    )
+    start = max(
+        [
+            start,
+            *(
+                e.t_ms
+                for e in events
+                if e.side == "agent" and e.kind == "speech_end" and start < e.t_ms < broken_at
+            ),
+        ]
+    )
+    return start, max(start, broken_at)
+
+
 def _silences(
     events: list[CallEvent], config: CallConfig, caller_spans: list[Interval], horizon: float
 ) -> list[Incident]:
     """Find silences of at least ``stall_s`` after an agent ``turn_end``.
 
-    The silence starts when the agent has stopped and any caller speech already
-    under way has finished.
+    See ``_silence_window`` for where each silence begins and ends.
     """
     found: list[Incident] = []
     for turn_end, previous_end in _agent_turn_ends(events):
-        start = max([turn_end, *(end for s, end in caller_spans if s < turn_end < end)])
-        end = min(
-            (
-                e.t_ms
-                for e in events
-                if e.t_ms > start
-                and (e.kind == "speech_start" or (e.side == "agent" and e.kind == "audio_start"))
-                and e.side != "harness"
-            ),
-            default=horizon,
-        )
+        start, end = _silence_window(events, turn_end, caller_spans, horizon)
         if end - start < config.stall_s * 1000:
             continue
         spoken = [

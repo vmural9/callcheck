@@ -168,8 +168,13 @@ def _required_names(scenario: Scenario) -> set[str]:
     return set(required)
 
 
-def _summary(fields: list[FieldVerdict], quality: QualityReport | None, stalled: bool) -> str:
-    """Build one deterministic sentence from the field counts, quality mean and stall flag."""
+def _summary(
+    fields: list[FieldVerdict],
+    quality: QualityReport | None,
+    stalled: bool,
+    timed_out: bool = False,
+) -> str:
+    """Build one deterministic sentence from the field counts, quality mean and end flags."""
     tally = Counter(f.verdict for f in fields)
     parts = [f"{tally['match']} of {len(fields)} fields matched"]
     for verdict, singular, plural in _SUMMARY_PHRASES:
@@ -181,7 +186,9 @@ def _summary(fields: list[FieldVerdict], quality: QualityReport | None, stalled:
     else:
         scores = [getattr(quality, dimension).score for dimension in _QUALITY_FAILURES]
         text += f"; quality {sum(scores) / len(scores):.1f}/5"
-    return text + ("; stalled." if stalled else ".")
+    if stalled:
+        return text + "; stalled."
+    return text + ("; timed out." if timed_out else ".")
 
 
 def _is_wrong(field: FieldVerdict, allow_near_miss: bool) -> bool:
@@ -198,21 +205,39 @@ def _decide(
     quality: QualityReport | None,
     stalled: bool,
     incidents: list[Incident],
+    *,
+    timed_out: bool = False,
+    nudge_refused: bool = False,
 ) -> tuple[RunVerdict, list[str]]:
     """Apply the verdict algebra and return the verdict with its failure types in order.
 
-    A stall the simulator caused makes the run an ``artifact`` whose only failure type is the
-    decisive incident's label: the call never finished for a reason that is not the agent's, so
-    field failures are not added. Otherwise a run fails on determinate evidence (too many wrong
-    required fields, a stall, an agent ``no_response`` or ``dead_end`` incident, or a quality
-    dimension below the floor); it is undetermined if a required field or the quality call is
-    open, and passes only when nothing is open. Failure types name only what decided the
-    verdict, so wrong fields within ``max_wrong`` are tolerated and not listed. Other incidents
-    never change the verdict.
+    A stop the simulator caused (a stall whose decisive incident is the simulator's, or a
+    caller that refused its nudge) makes the run an ``artifact`` whose only failure type is
+    that label (``simulator_error`` for a refused nudge): the call never finished for a reason
+    that is not the agent's, so field failures are not added. If the agent also had a
+    ``no_response`` or ``dead_end`` fault, that is not erased: the run fails with those labels
+    followed by the simulator's. Otherwise a run fails on determinate evidence (too many wrong
+    required fields, a stall, running out of time as ``timed_out``, an agent ``no_response`` or
+    ``dead_end`` incident, or a quality dimension below the floor); it is undetermined if a
+    required field or the quality call is open, and passes only when nothing is open. Failure
+    types name only what decided the verdict, so wrong fields within ``max_wrong`` are tolerated
+    and not listed. Other incidents never change the verdict.
     """
     decisive = decisive_incident(incidents)
-    if stalled and decisive is not None and decisive.attribution == "simulator":
-        return "artifact", [decisive.label]
+    agent_labels = [
+        i.label for i in incidents if i.attribution == "agent" and i.label in _AGENT_FAULTS
+    ]
+    simulator_label: str | None = None
+    if nudge_refused:
+        simulator_label = "simulator_error"
+    elif stalled and decisive is not None and decisive.attribution == "simulator":
+        simulator_label = decisive.label
+    if stalled and decisive is not None and decisive.attribution == "agent":
+        agent_labels.insert(0, decisive.label)
+    if simulator_label is not None:
+        if agent_labels:
+            return "fail", [*dict.fromkeys(agent_labels), simulator_label]
+        return "artifact", [simulator_label]
     criteria = scenario.pass_criteria
     required = [f for f in fields if f.name in required_names]
     wrong = [f for f in required if _is_wrong(f, criteria.allow_near_miss)]
@@ -226,13 +251,10 @@ def _decide(
         for dimension, failure in _QUALITY_FAILURES.items()
         if quality is not None and getattr(quality, dimension).score < criteria.quality_floor
     ]
-    agent_labels = [
-        i.label for i in incidents if i.attribution == "agent" and i.label in _AGENT_FAULTS
-    ]
-    if stalled and decisive is not None and decisive.attribution == "agent":
-        agent_labels.insert(0, decisive.label)
     if stalled:
         failures.append("stalled")
+    if timed_out:
+        failures.append("timed_out")
     failures += dict.fromkeys(agent_labels)
     failures += low_quality
     if failures:
@@ -286,7 +308,23 @@ async def judge_run(run_dir: Path, scenario: Scenario, chat: ChatModel) -> Judge
         reasons,
     )
     stalled = outcome.get("reason") == "stalled"
-    verdict, failures = _decide(scenario, required_names, fields, quality, stalled, incidents)
+    timed_out = outcome.get("reason") == "max_duration"
+    refused = any(
+        ev.side == "harness"
+        and ev.kind == "watchdog"
+        and ev.payload.get("reason") == "nudge_refused"
+        for ev in events
+    )
+    verdict, failures = _decide(
+        scenario,
+        required_names,
+        fields,
+        quality,
+        stalled,
+        incidents,
+        timed_out=timed_out,
+        nudge_refused=refused,
+    )
     if outcome.get("reason") == "error":
         # A crashed call says nothing about the agent: never a pass, never a blamed field.
         verdict, failures = "undetermined", []
@@ -297,7 +335,7 @@ async def judge_run(run_dir: Path, scenario: Scenario, chat: ChatModel) -> Judge
         fields=fields,
         quality=quality,
         captured_method=method,
-        summary=_summary(fields, quality, stalled),
+        summary=_summary(fields, quality, stalled, timed_out),
         undetermined_reasons=reasons,
         incidents=incidents,
         usage=chat.usage,

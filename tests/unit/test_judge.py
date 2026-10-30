@@ -403,3 +403,49 @@ def test_rubric_scores_five_without_corrections():
     rubric = load_rubric()
     assert "If the caller made no correction, score 5 and say so." in rubric
     assert "A read-back the caller confirmed is not a correction." in rubric
+
+
+def _watchdog_run(tmp_path: Path, incidents: list[Incident], reason: str, label: str):
+    """Write a stalled run whose events include a watchdog ending, with ``incidents`` saved."""
+    run = _write_run(tmp_path / "dog", fields=GOOD_FIELDS, outcome={"reason": "stalled"})
+    dog = CallEvent(9500, "harness", "watchdog", {"reason": reason, "label": label})
+    with (run / "events.jsonl").open("a", encoding="utf-8") as f:
+        f.write(event_to_json(dog) + "\n")
+    write_incidents(run, incidents)
+    return run
+
+
+async def test_agent_fault_is_not_erased_by_a_simulator_stall(tmp_path, scenario):
+    earlier = _incident("dead_end", "agent", t_ms=3000.0)
+    stall = _incident("caller_stall", "simulator", ends_call=True)
+    run = _run_with_incidents(tmp_path, [earlier, stall], {"reason": "stalled"})
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["dead_end", "caller_stall"]
+
+
+async def test_refused_nudge_is_an_artifact_with_simulator_error(tmp_path, scenario):
+    stall = _incident("caller_stall", "simulator", ends_call=True)
+    run = _watchdog_run(tmp_path, [stall], "nudge_refused", "caller_stall")
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "artifact" and r.failure_types == ["simulator_error"]
+
+
+async def test_refused_nudge_does_not_erase_an_agent_fault(tmp_path, scenario):
+    quiet = _incident("no_response", "agent", ends_call=True)
+    run = _watchdog_run(tmp_path, [quiet], "nudge_refused", "no_response")
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["no_response", "simulator_error"]
+
+
+async def test_running_out_of_time_is_a_failure(tmp_path, scenario):
+    run = _write_run(tmp_path / "long", fields=GOOD_FIELDS, outcome={"reason": "max_duration"})
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["timed_out"]
+    assert r.summary.endswith("; timed out.")
+
+
+async def test_running_out_of_time_with_a_simulator_stall_incident_still_fails(tmp_path, scenario):
+    stall = _incident("caller_stall", "simulator", ends_call=True)
+    run = _run_with_incidents(tmp_path, [stall], {"reason": "max_duration"})
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["timed_out"]

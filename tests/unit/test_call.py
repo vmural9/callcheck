@@ -396,6 +396,36 @@ async def test_nudge_refused_ends_call():
     assert decisive.attribution == "agent"
 
 
+class SilentNudgeCaller(FakeCaller):
+    """Fake caller that accepts a nudge, as a real one does, but says nothing afterwards."""
+
+    async def nudge(self, instruction: str) -> bool:
+        """Accept the nudge and stay quiet."""
+        return True
+
+
+async def test_silence_after_an_accepted_nudge_is_recorded_as_max_nudges():
+    channel = FakeChannel()
+    sink = ListSink()
+    call = Call(
+        caller=SilentNudgeCaller(channel, FORM_ANSWERS, script=[]),
+        target=FakeTarget(channel, FORM_FIELDS),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    )
+    outcome = await call.run()
+    assert outcome.reason == "stalled"
+    [nudge] = of_kind(sink, "nudge")
+    [dog] = of_kind(sink, "watchdog")
+    assert dog.payload == {"reason": "max_nudges", "label": nudge.payload["label"]}
+    incidents = detect_incidents(sink.events, CallConfig(), caller_interrupts_expected=False)
+    decisive = decisive_incident(incidents)
+    assert decisive is not None and decisive.label == "caller_stall"
+    assert decisive.attribution == "simulator"
+
+
 async def test_the_nudge_instruction_reaches_the_caller():
     call, _, caller = nudging_call({"go_silent_after": 2})
     heard: list[str] = []

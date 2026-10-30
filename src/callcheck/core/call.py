@@ -95,6 +95,7 @@ class Call:
         self._nudges_sent = 0
         self._nudge_task: asyncio.Task[bool] | None = None
         self._nudge_label = ""
+        self._nudged_at: float | None = None
         self._endpoints: dict[Side, VoiceEndpoint] = {"caller": caller, "agent": target}
         self._lanes = {
             "caller": self._lane(speaker=caller, listener=target),
@@ -248,7 +249,12 @@ class Call:
         if now - self._t0 >= self._settings.max_seconds:
             return self._conclude("max_duration")
         if now - self._last_activity > 2 * self._settings.stall_s:
-            self._record("harness", "watchdog", reason="stalled")
+            if self._nudged_at is not None and self._last_activity <= self._nudged_at:
+                # A nudge went out and nothing has been spoken since: the nudge did not work,
+                # which is the same ending as running out of nudges, so name its spell.
+                self._record("harness", "watchdog", reason="max_nudges", label=self._nudge_label)
+            else:
+                self._record("harness", "watchdog", reason="stalled")
             return self._conclude("stalled")
         if self._done_at is not None and self._finished_speaking(now):
             return self._conclude("caller_done")
@@ -260,7 +266,8 @@ class Call:
         The nudge runs as a task so a slow ``nudge()`` never holds up the 20 ms ticker;
         each tick first looks at whether the one in flight has finished. A refused nudge,
         (including one that raises, which is also recorded as a recoverable error), or a quiet
-        spell after ``max_nudges`` nudges, ends the call as ``stalled``.
+        spell after ``max_nudges`` nudges, ends the call as ``stalled``; so does the silence
+        backstop when a nudge went out and nothing was said since (recorded as ``max_nudges``).
         """
         if self._monitor is None or self._done_at is not None:
             return None
@@ -285,7 +292,7 @@ class Call:
         self._nudges_sent += 1
         self._nudge_label = label
         self._record("harness", "nudge", label=label, n=self._nudges_sent)
-        self._last_activity = now
+        self._last_activity = self._nudged_at = now
         self._nudge_task = asyncio.create_task(self._caller.nudge(NUDGE_TEXT))
         return None
 

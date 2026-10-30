@@ -60,10 +60,18 @@ This is real output, not a mock-up: an excerpt of the `report.md` from a live ba
 personas, judged by Claude on Bedrock). Rows and sections are omitted, nothing is edited. The
 links point into that batch's run directory, which is not committed.
 
-The three planted bugs show up as a date of birth that never matches (`day_month_swap`),
-`correction_ignored` in 5 runs (`ignore_corrections`), and a missing field in `out_of_order-4`
-(`strict_order`). The email and address rows are not planted bugs: they are the agent mishearing
-spoken text. See [docs/research/m2-live-notes.md](docs/research/m2-live-notes.md).
+The sample shows two of the three planted bugs: a date of birth that never matches
+(`day_month_swap`) and corrections that never reach the form (`ignore_corrections`: the email
+row, where the agent's last save was right but the stored value was not). `strict_order` lives in
+the form store, where a save for a field ahead of the first unsaved one is silently dropped. It
+is shown by a separate run of the `out_of_order` persona, not by this sample:
+
+```
+uv run callcheck run scenarios/intake_new_patient.yaml --target nova-sonic --caller nova-sonic \
+    -n 2 --parallel 2 --personas out_of_order --seed 11
+```
+
+See [docs/research/m2-live-notes.md](docs/research/m2-live-notes.md).
 
 ````markdown
 # callcheck batch report
@@ -91,7 +99,6 @@ spoken text. See [docs/research/m2-live-notes.md](docs/research/m2-live-notes.md
 | repetition | 5 | [baseline-1](baseline-1/transcript.md) |
 | correction_ignored | 5 | [baseline-1](baseline-1/transcript.md) |
 | bad_closing | 3 | [out_of_order-8](out_of_order-8/transcript.md) |
-| field_missing | 1 | [out_of_order-4](out_of_order-4/transcript.md) |
 
 ## Field accuracy
 

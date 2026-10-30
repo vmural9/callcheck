@@ -37,9 +37,27 @@ repo, whose rates are unverified; a leading "≥" marks a sum that leaves out us
 
 - `day_month_swap`: `date_of_birth` matched in 0 of 7 runs with a captured value; the most
   common wrong value was `1988-07-03`. With the bugs off it matched 4 of 4.
-- `ignore_corrections`: the judge reported `correction_ignored` in 5 of the 8 runs (counted after
-  the batch was re-judged with the fixes below).
-- `strict_order`: `field_missing` in `out_of_order-4`.
+- `ignore_corrections`: `field_mismatch` on corrected fields where the agent's last save was
+  right but the store kept the first value. For example, `email`: the last save was correct in 5
+  runs of the first batch and the stored value was wrong. The judge's `correction_ignored` label
+  (5 of 8 runs after re-judging) also appears with the bugs off, so it is not by itself evidence
+  of the planted bug.
+- `strict_order`: not shown by the first batch. The `field_missing` in `out_of_order-4` was not
+  this bug: that call hit the 480 s maximum duration stuck on `emergency_contact_phone`, and it
+  is now graded with the failure type `timed_out`. Getting a live proof took three attempts:
+  1. The caller never volunteered a field early, because the brief never said when. The brief
+     now tells it to give the field together with the previous one.
+  2. With the bug written only in the agent's prompt, the live Nova Sonic agent ignored it: it
+     said it would get to the field, then asked anyway.
+  3. The bug moved into the form store. A save for a field ahead of the first unsaved field is
+     silently dropped, and so is every later save of that field, while the prompt tells the agent
+     to save early answers and not ask again.
+
+  Live proof: run `20261031-024240-intake-new-patient`, persona `out_of_order`, 2 runs, seed 11
+  (`uv run callcheck run scenarios/intake_new_patient.yaml --target nova-sonic --caller nova-sonic -n 2 --parallel 2 --personas out_of_order --seed 11`).
+  Both runs ended in `field_missing` on `email`: the agent saved the caller's early email at
+  12.8 s together with `first_name`, before `last_name`, and the store dropped it and every
+  later email save.
 
 ## The clean agent does not reach 100%
 
@@ -74,10 +92,21 @@ clean-run batch was re-judged too; its `address_line` row stays at 2 of 4 becaus
 said "two hundred eighteen", and compound number words are not normalised (only digit-by-digit
 runs are).
 
+Fixes from the final review:
+
+- A caller who accepts a nudge and then stays silent is an artifact, not an agent failure.
+- Running out of time is a failure of type `timed_out`.
+- An agent `no_response` or `dead_end` is never erased by an artifact ending.
+- A refused nudge is an artifact of type `simulator_error`.
+- TTFA skips gaps where the agent was already speaking.
+- Retried attempts count in the batch cost.
+- Phone captures of 7 to 9 digits count as mismatches.
+- More negation words are recognised.
+
 ## Calls and spend
 
-- 14 live calls against the ceiling of 30: 2 preflights and 12 graded calls (8 + 4).
-- About $1.70 for the calls plus about $0.35 for re-judging. The ceiling was 15 USD.
+- 23 live calls against the ceiling of 30: 4 preflights and 19 graded calls.
+- About $2.60 for the calls plus about $0.35 for re-judging, an estimate. The ceiling was 15 USD.
 - Nova text tokens are not priced and the other rates are unverified, so the call figure may be
   low.
 

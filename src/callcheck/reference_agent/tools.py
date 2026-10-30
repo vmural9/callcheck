@@ -66,7 +66,14 @@ class FormStore:
         """Return whether ``name`` is dropped: skipped before, or ahead of the first unsaved one."""
         if name in self._skipped:
             return True
-        first_unsaved = next((i for i, n in enumerate(self._order) if n not in self._fields), 0)
+        first_unsaved = next(
+            (
+                i
+                for i, n in enumerate(self._order)
+                if n not in self._fields and n not in self._skipped
+            ),
+            0,
+        )
         if self._order.index(name) > first_unsaved:
             self._skipped.add(name)
             return True

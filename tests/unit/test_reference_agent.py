@@ -157,3 +157,10 @@ def test_strict_order_does_not_change_the_prompt():
         load_reference_agent(names, frozenset({"strict_order"})).system_prompt
         == load_reference_agent(names, frozenset()).system_prompt
     )
+
+
+async def test_strict_order_skipped_field_does_not_cascade_to_later_ones():
+    s = FormStore(["a", "b", "c", "d"], {}, frozenset({"strict_order"}))
+    for n in ("a", "c", "b", "d", "c"):
+        await s.execute("save_field", {"name": n, "value": n.upper()})
+    assert s.snapshot()["fields"] == {"a": "A", "b": "B", "d": "D"}

@@ -96,6 +96,14 @@ async def test_close_ends_the_event_stream_with_closed():
     assert kinds[-1] == "closed" and kinds.count("closed") == 1
 
 
+async def test_close_is_idempotent_and_a_finished_stream_ends_at_once():
+    target, _ = make_pair()
+    await target.close()
+    await target.close()
+    assert [e.kind async for e in target.events()] == ["closed"]
+    assert [e.kind async for e in target.events()] == []
+
+
 async def test_caller_nudge_speaks_hello_and_is_accepted():
     _, caller = make_pair()
     assert await caller.nudge("say something") is True

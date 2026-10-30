@@ -54,6 +54,7 @@ class FakeEndpoint(VoiceEndpoint):
         self._freq_hz = freq_hz
         self._queue: asyncio.Queue[CallEvent] = asyncio.Queue()
         self._vad = EnergyVad()
+        self._closed = False
 
     async def start(self) -> None:
         """Begin the session; a fake has nothing to open unless a subclass speaks first."""
@@ -64,8 +65,11 @@ class FakeEndpoint(VoiceEndpoint):
             self._hear(self._inbox.get_nowait())
 
     async def events(self) -> AsyncIterator[CallEvent]:
-        """Yield queued events, waiting for more, until the ``closed`` event has been yielded."""
-        while True:
+        """Yield queued events, waiting for more, until the ``closed`` event has been yielded.
+
+        Returns at once if the endpoint is closed and nothing is left to yield.
+        """
+        while not (self._closed and self._queue.empty()):
             ev = await self._queue.get()
             yield ev
             if ev.kind == "closed":
@@ -79,8 +83,10 @@ class FakeEndpoint(VoiceEndpoint):
         return drained
 
     async def close(self) -> None:
-        """End the session by queueing the final ``closed`` event."""
-        self._emit("closed")
+        """End the session by queueing the final ``closed`` event once; later calls do nothing."""
+        if not self._closed:
+            self._closed = True
+            self._emit("closed")
 
     def _hear(self, text: str) -> None:
         """React to the words of one finished utterance from the other side."""

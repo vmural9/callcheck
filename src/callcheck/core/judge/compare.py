@@ -21,6 +21,8 @@ _NEAR_MISS_RATIO = 0.75
 _BAND_WIDTH = 0.20
 _PHONE_TAIL = 10
 _NUMBER_TOLERANCE = 1e-9
+_DEFAULT_A = datetime(2000, 1, 1)
+_DEFAULT_B = datetime(2001, 2, 2)
 _TRUE_WORDS = frozenset({"true", "yes", "y", "1"})
 _FALSE_WORDS = frozenset({"false", "no", "n", "0"})
 _LIST_SPLIT = re.compile(r",|\band\b", re.IGNORECASE)
@@ -40,15 +42,21 @@ def normalize_phone(s: str) -> str:
 
 
 def parse_date(s: Any) -> date | None:
-    """Return ``s`` as a date, or ``None`` when it is not a date or does not parse."""
+    """Return ``s`` as a date, or ``None`` when it does not parse or lacks a year, month or day.
+
+    A string is parsed against two different default dates; if the results differ, some
+    component came from a default rather than from the text, so the date is partial.
+    """
     if isinstance(s, datetime):
         return s.date()
     if isinstance(s, date):
         return s
     try:
-        return date_parser.parse(s, dayfirst=False).date()
+        first = date_parser.parse(s, dayfirst=False, default=_DEFAULT_A).date()
+        second = date_parser.parse(s, dayfirst=False, default=_DEFAULT_B).date()
     except (ValueError, OverflowError, TypeError):
         return None
+    return first if first == second else None
 
 
 def similarity(a: str, b: str) -> float:
@@ -98,7 +106,7 @@ def _compare_date(spec: FieldSpec, captured: Any) -> Outcome:
     """Compare parsed dates; a captured value that does not parse is undetermined."""
     got = parse_date(captured)
     if got is None:
-        return "undetermined", f"could not parse {captured!r} as a date"
+        return "undetermined", f"partial or unparseable date: {captured!r}"
     want = parse_date(spec.expected)
     return _equal(want == got, f"dates {want} vs {got}")
 

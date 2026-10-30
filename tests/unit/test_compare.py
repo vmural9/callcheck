@@ -69,3 +69,12 @@ def test_number_alnum_list_string_and_empty():
 
 def test_tolerance_moves_bands():
     assert V(P("text", "knee pain", tolerance=0.99), "knee pains") == "near_miss"
+
+
+def test_partial_dates_are_undetermined_whatever_today_is():
+    expected = P("date", date(1988, 3, 7))
+    assert V(expected, "March 7th") == "undetermined"
+    assert V(expected, "1988") == "undetermined"
+    assert V(expected, "March 7th, 1988") == "match"
+    note = compare_field(expected, "March 7th", "result").note
+    assert "partial" in note and "'March 7th'" in note

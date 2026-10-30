@@ -34,6 +34,7 @@ def offline(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_PROFILE", "")  # set, so a repo .env cannot supply one
     monkeypatch.setenv("CALLCHECK_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(cli, "MonotonicClock", VirtualClock)
+    monkeypatch.setattr(cli, "RETRY_DELAY_S", 0)
 
 
 def invoke(*args: str):
@@ -222,14 +223,24 @@ class CrashingTarget(FakeTarget):
 
 
 def test_call_error_is_printed_judged_undetermined_and_exits_1(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        cli,
-        "_build_target",
-        lambda name, agent, fields, channel, settings: CrashingTarget(channel, fields),
-    )
+    placed = []
+
+    def crashing(name, agent, fields, channel, settings):
+        placed.append(name)
+        return CrashingTarget(channel, fields)
+
+    monkeypatch.setattr(cli, "_build_target", crashing)
     res = invoke("run", SCENARIO, *FAKES, "-n", "2", "--skip-preflight")
     assert res.exit_code == 1, res.output
     assert res.output.count("call ended: error - model access denied") == 2
+    assert "baseline-1: call ended: error" in res.output
+    assert "baseline-2: call ended: error" in res.output
+    assert len(placed) == 4  # each run placed exactly twice
+    batch = batch_dir(tmp_path)
+    assert {p.name for p in batch.glob("*.attempt1")} == {
+        "baseline-1.attempt1",
+        "baseline-2.attempt1",
+    }
     runs = run_dirs(tmp_path)
     assert len(runs) == 2
     for run in runs:
@@ -389,3 +400,33 @@ def test_metrics_are_written_after_judging_so_they_can_price_the_judge(tmp_path,
     res = invoke("run", SCENARIO, *FAKES, "--skip-preflight")
     assert res.exit_code == 0, res.output
     assert order == ["write_incidents", "judge_run", "write_metrics", "write_run_report"]
+
+
+def test_a_run_that_crashes_is_named_recorded_as_errored_and_exits_1(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("no such voice")
+
+    monkeypatch.setattr(cli, "_build_target", boom)
+    res = invoke("run", SCENARIO, *FAKES, "-n", "2", "--skip-preflight")
+    assert res.exit_code == 1, res.output
+    assert "baseline-1: crashed - no such voice" in res.output
+    assert "baseline-2: crashed - no such voice" in res.output
+    batch = batch_dir(tmp_path)
+    summary = json.loads((batch / "report.json").read_text())
+    assert summary["counts"]["errored"] == 2 and summary["n"] == 2
+    outcome = json.loads((batch / "baseline-1" / "outcome.json").read_text())
+    assert outcome == {"reason": "error", "duration_ms": 0, "error": "no such voice"}
+
+
+def test_pricing_is_loaded_once_per_batch(monkeypatch):
+    loads = []
+    real = cli.load_pricing
+
+    def counting(path):
+        loads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(cli, "load_pricing", counting)
+    res = invoke("run", SCENARIO, *FAKES, "-n", "3", "--skip-preflight")
+    assert res.exit_code == 0, res.output
+    assert len(loads) == 1

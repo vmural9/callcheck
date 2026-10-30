@@ -63,6 +63,7 @@ app = typer.Typer(
 console = Console()
 
 EXIT_USAGE = 2
+RETRY_DELAY_S = 2.0  # pause before a call is placed again, so a throttled endpoint can recover
 PREFLIGHT_PHRASE = "Hello, can you hear me? Testing one two three."
 PREFLIGHT_FIELDS = ["first_name", "phone"]
 VERDICT_STYLE = {"pass": "green", "fail": "red", "undetermined": "yellow", "artifact": "magenta"}
@@ -226,8 +227,17 @@ def _call_error(run_dir: Path) -> str | None:
 def _find_pricing() -> dict | None:
     """Return the pricing table from the nearest ``pricing.yaml`` above this file, if any."""
     for parent in Path(__file__).resolve().parents:
-        if (parent / "pricing.yaml").is_file():
-            return load_pricing(parent / "pricing.yaml")
+        table = parent / "pricing.yaml"
+        if table.is_file():
+            try:
+                return load_pricing(table)
+            except Exception as exc:
+                console.print(
+                    f"pricing.yaml unreadable ({escape(str(exc))}); costs will show n/a.",
+                    style="yellow",
+                    soft_wrap=True,
+                )
+                return None
     return None
 
 
@@ -236,6 +246,7 @@ async def _grade(
     scenario: Scenario,
     chat: ChatModel,
     choices: _Choices,
+    pricing: dict | None,
     *,
     interrupts_expected: bool,
 ) -> JudgeResult | None:
@@ -254,9 +265,7 @@ async def _grade(
         )
         write_incidents(run_dir, incidents)
         result = await judge_run(run_dir, scenario, chat)
-        write_metrics(
-            run_dir, _find_pricing(), agent_model=choices.target, caller_model=choices.caller
-        )
+        write_metrics(run_dir, pricing, agent_model=choices.target, caller_model=choices.caller)
         write_run_report(run_dir)
     except Exception as exc:
         console.print(
@@ -269,12 +278,25 @@ async def _grade(
     return result
 
 
-def _note_call_error(run_dir: Path) -> bool:
-    """Print the call's error, if it ended in one, and return whether it did."""
+def _note_call_error(run_dir: Path, name: str) -> bool:
+    """Print the call's error under the run's ``name``, if it ended in one; say whether it did."""
     call_error = _call_error(run_dir)
     if call_error:
-        console.print(f"call ended: error - {escape(call_error)}", style="red", soft_wrap=True)
+        console.print(
+            f"{escape(name)}: call ended: error - {escape(call_error)}",
+            style="red",
+            soft_wrap=True,
+        )
     return call_error is not None
+
+
+def _record_crash(run_dir: Path, error: str) -> None:
+    """Make sure ``run_dir`` exists with an ``outcome.json``, so the batch report counts it."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outcome = run_dir / "outcome.json"
+    if not outcome.exists():
+        body = {"reason": "error", "duration_ms": 0, "error": error}
+        outcome.write_text(json.dumps(body, indent=2), encoding="utf-8")
 
 
 async def _place_call(
@@ -318,31 +340,53 @@ def _make_place(
     scenario: Scenario,
     personas: dict[str, Persona],
     chat: ChatModel,
+    pricing: dict | None,
 ) -> Callable[[RunSpec, Path], Awaitable[RunResult]]:
     """Return the ``place(spec, run_dir)`` function ``run_matrix`` calls for each run.
 
     A call that ends in an error is reported as ``"transport_error"`` so the matrix retries it
     once (the mixer cannot tell a transport failure from any other endpoint failure). The
     first attempt of such a call is not judged; the retry is, whatever its outcome, so a call
-    that fails twice still ends with a verdict and a report.
+    that fails twice still ends with a verdict and a report. The retry waits ``RETRY_DELAY_S``.
+    Anything else that goes wrong while placing or grading a run is printed against the run,
+    recorded as an errored outcome, and returned as ``"error"``; it never ends the batch.
     """
     attempts: Counter[RunSpec] = Counter()
 
     async def place(spec: RunSpec, run_dir: Path) -> RunResult:
         attempts[spec] += 1
+        if attempts[spec] > 1:
+            await asyncio.sleep(RETRY_DELAY_S)
+        try:
+            return await attempt(spec, run_dir)
+        except Exception as exc:
+            console.print(
+                f"{escape(spec.dir_name)}: crashed - {escape(str(exc))}",
+                style="red",
+                soft_wrap=True,
+            )
+            _record_crash(run_dir, str(exc))
+            return "error"
+
+    async def attempt(spec: RunSpec, run_dir: Path) -> RunResult:
         persona = personas[spec.persona_id]
         plan = make_plan(scenario, persona, spec.seed)
         made = await _place_call(settings, choices, scenario, persona, plan, run_dir)
         if _call_error(made) and attempts[spec] == 1:
             return "transport_error"
         result = await _grade(
-            made, scenario, chat, choices, interrupts_expected=persona.behaviours.interrupts
+            made,
+            scenario,
+            chat,
+            choices,
+            pricing,
+            interrupts_expected=persona.behaviours.interrupts,
         )
         if result is None:
             return "error"
         style = VERDICT_STYLE.get(result.verdict, "white")
         console.print(f"{escape(spec.dir_name)}: [bold {style}]{result.verdict}[/]")
-        return "transport_error" if _note_call_error(made) else "ok"
+        return "transport_error" if _note_call_error(made, spec.dir_name) else "ok"
 
     return place
 
@@ -395,7 +439,7 @@ async def _run_batch(
     }
     meta_path = batch_dir / "batch.json"
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    place = _make_place(settings, choices, scenario, personas, chat)
+    place = _make_place(settings, choices, scenario, personas, chat, _find_pricing())
     results = await run_matrix(specs, place, batch_dir, parallel)
     meta["finished"] = datetime.now().astimezone().isoformat()
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -572,12 +616,19 @@ def judge(
     target, caller = _endpoints_of(run_dir)
     choices = _Choices(target, caller, name, voice=None, bugs=frozenset())
     result = asyncio.run(
-        _grade(run_dir, scenario, chat, choices, interrupts_expected=_interrupts_expected(run_dir))
+        _grade(
+            run_dir,
+            scenario,
+            chat,
+            choices,
+            _find_pricing(),
+            interrupts_expected=_interrupts_expected(run_dir),
+        )
     )
     if result is None:
         raise typer.Exit(1)
     _show_verdict(result, run_dir, run_dir / "report.md")
-    if _note_call_error(run_dir):
+    if _note_call_error(run_dir, run_dir.name):
         raise typer.Exit(1)
 
 

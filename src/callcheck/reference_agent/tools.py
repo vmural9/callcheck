@@ -72,7 +72,7 @@ class FormStore:
                 for i, n in enumerate(self._order)
                 if n not in self._fields and n not in self._skipped
             ),
-            0,
+            len(self._order),
         )
         if self._order.index(name) > first_unsaved:
             self._skipped.add(name)

@@ -164,3 +164,12 @@ async def test_strict_order_skipped_field_does_not_cascade_to_later_ones():
     for n in ("a", "c", "b", "d", "c"):
         await s.execute("save_field", {"name": n, "value": n.upper()})
     assert s.snapshot()["fields"] == {"a": "A", "b": "B", "d": "D"}
+
+
+async def test_strict_order_still_takes_a_correction_once_the_form_is_full():
+    names = ["a", "b", "c", "d", "e"]
+    s = FormStore(names, {}, frozenset({"strict_order"}))
+    for n in names:
+        await s.execute("save_field", {"name": n, "value": "old"})
+    await s.execute("save_field", {"name": "d", "value": "new"})
+    assert s.snapshot()["fields"]["d"] == "new"

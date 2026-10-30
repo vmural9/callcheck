@@ -27,11 +27,17 @@ class FakeChat(ChatModel):
     conversational quality 5.
     """
 
-    def __init__(self, responses: list[dict | str] | None = None) -> None:
+    model_id = "fake"
+
+    def __init__(
+        self, responses: list[dict | str] | None = None, *, usage: dict | None = None
+    ) -> None:
         """Script the replies: a ``dict`` is a JSON reply, a ``str`` is text that is not JSON.
 
-        ``None`` (the default) selects the scriptless mode described on the class.
+        ``None`` (the default) selects the scriptless mode described on the class. ``usage``
+        is the token usage every reply reports (empty by default).
         """
+        self._usage = dict(usage or {})
         self._scripted = responses is not None
         self._responses = list(responses or [])
         self.calls: list[list[Message]] = []
@@ -50,10 +56,10 @@ class FakeChat(ChatModel):
             if title not in _BY_SCHEMA_TITLE:
                 raise AssertionError(f"scriptless FakeChat has no answer for schema {title!r}")
             response = _BY_SCHEMA_TITLE[title]
-            return ChatResult(text=json.dumps(response), json=response, usage={})
+            return ChatResult(text=json.dumps(response), json=response, usage=dict(self._usage))
         if not self._responses:
             raise AssertionError("FakeChat exhausted")
         response = self._responses.pop(0)
         if isinstance(response, dict):
-            return ChatResult(text=json.dumps(response), json=response, usage={})
-        return ChatResult(text=response, json=None, usage={})
+            return ChatResult(text=json.dumps(response), json=response, usage=dict(self._usage))
+        return ChatResult(text=response, json=None, usage=dict(self._usage))

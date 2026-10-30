@@ -28,7 +28,7 @@ Did the agent misunderstand, loop, or lose the thread?
 
 When the caller corrected a value, did the agent acknowledge it and use the corrected value?
 
-If the caller made no correction, score 5.
+If the caller made no correction, score 5 and say so. A read-back the caller confirmed is not a correction.
 
 - 0: Ignored the correction and kept the wrong value to the end.
 - 3: Acknowledged the correction but wavered, or needed it repeated before using it.

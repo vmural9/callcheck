@@ -101,3 +101,10 @@ def test_temperature_is_sent_only_when_given():
     chat = BedrockChat(model_id="m", region="us-west-2", client=fake)
     asyncio.run(chat.complete([Message("user", "u")], temperature=0.3))
     assert fake.kwargs["inferenceConfig"] == {"maxTokens": 4096, "temperature": 0.3}
+
+
+def test_model_id_is_exposed_for_usage_pricing():
+    chat = BedrockChat(
+        model_id="us.anthropic.claude-sonnet-5-5", region="us-west-2", client=object()
+    )
+    assert chat.model_id == "us.anthropic.claude-sonnet-5-5"

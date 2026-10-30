@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from callcheck.core.turns import Incident
+
 Verdict = Literal["match", "near_miss", "mismatch", "missing", "undetermined"]
 RunVerdict = Literal["pass", "fail", "undetermined", "artifact"]
 Method = Literal["result", "transcript"]
@@ -65,3 +67,5 @@ class JudgeResult(BaseModel):
     captured_method: Method
     summary: str
     undetermined_reasons: list[str] = []
+    incidents: list[Incident] = []
+    usage: list[dict] = []

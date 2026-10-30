@@ -7,9 +7,18 @@ import pytest
 
 from callcheck.adapters.chat import make_chat
 from callcheck.adapters.chat.fake import FakeChat
+from callcheck.core.chat import ChatResult
 from callcheck.core.events import CallEvent, event_to_json
 from callcheck.core.judge.judge import judge_run
-from callcheck.core.scenario import Correction, Scenario, VariationPlan, load_scenario
+from callcheck.core.judge.prompts import load_rubric
+from callcheck.core.scenario import (
+    Correction,
+    OffTopic,
+    Scenario,
+    VariationPlan,
+    load_scenario,
+)
+from callcheck.core.turns import Incident, write_incidents
 
 SCENARIO_PATH = Path(__file__).parents[2] / "scenarios" / "intake_short.yaml"
 
@@ -250,3 +259,147 @@ async def test_call_error_is_undetermined_with_the_error_as_first_reason(tmp_pat
     # The fields are still compared and reported, so the evidence is not lost.
     assert next(f for f in r.fields if f.name == "phone").verdict == "mismatch"
     assert json.loads((run / "judge.json").read_text())["verdict"] == "undetermined"
+
+
+def _incident(label, attribution, *, t_ms=5000.0, ends_call=False, reason="because"):
+    """Build one turn-taking incident for a run directory."""
+    return Incident(
+        t_ms=t_ms,
+        label=label,
+        attribution=attribution,
+        confidence="high",
+        reason=reason,
+        ends_call=ends_call,
+    )
+
+
+def _run_with_incidents(tmp_path: Path, incidents: list[Incident], outcome: dict | None = None):
+    """Write a run whose fields all match, with ``incidents.json`` and ``outcome`` as given."""
+    run = _write_run(tmp_path / "inc", fields=GOOD_FIELDS, outcome=outcome)
+    write_incidents(run, incidents)
+    return run
+
+
+async def test_simulator_stall_is_artifact(tmp_path, scenario):
+    stall = _incident("caller_stall", "simulator", ends_call=True)
+    run = _run_with_incidents(tmp_path, [stall], {"reason": "stalled"})
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "artifact" and r.failure_types == ["caller_stall"]
+    assert r.incidents == [stall]
+    assert json.loads((run / "judge.json").read_text())["verdict"] == "artifact"
+
+
+async def test_simulator_stall_artifact_ignores_field_failures(tmp_path, scenario):
+    stall = _incident("caller_not_heard", "simulator", ends_call=True)
+    run = _write_run(
+        tmp_path / "inc2",
+        fields=dict(GOOD_FIELDS, phone="415 555 0143"),
+        outcome={"reason": "stalled"},
+    )
+    write_incidents(run, [stall])
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "artifact" and r.failure_types == ["caller_not_heard"]
+
+
+async def test_agent_stall_fails_with_stalled_and_its_label(tmp_path, scenario):
+    dead = _incident("dead_end", "agent", ends_call=True)
+    run = _run_with_incidents(tmp_path, [dead], {"reason": "stalled"})
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["stalled", "dead_end"]
+
+
+async def test_unclear_stall_fails_with_stalled_only(tmp_path, scenario):
+    unclear = _incident("caller_stall", "unclear", ends_call=True)
+    run = _run_with_incidents(tmp_path, [unclear], {"reason": "stalled"})
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["stalled"]
+
+
+async def test_agent_no_response_fails(tmp_path, scenario):
+    quiet = _incident("no_response", "agent")
+    run = _run_with_incidents(tmp_path, [quiet, quiet])
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "fail" and r.failure_types == ["no_response"]
+    assert len(r.incidents) == 2
+
+
+async def test_simulator_no_response_does_not_fail(tmp_path, scenario):
+    run = _run_with_incidents(tmp_path, [_incident("no_response", "unclear")])
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "pass" and r.failure_types == []
+
+
+async def test_slow_response_does_not_change_verdict(tmp_path, scenario):
+    soft = [
+        _incident("slow_response", "agent"),
+        _incident("agent_interrupts", "agent"),
+        _incident("turn_edge", "expected"),
+        _incident("double_talk", "agent"),
+        _incident("caller_interrupts", "simulator"),
+    ]
+    run = _run_with_incidents(tmp_path, soft)
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "pass" and r.failure_types == []
+    assert [i.label for i in r.incidents] == [i.label for i in soft]
+
+
+async def test_missing_incidents_file_is_fine(run_dir, scenario):
+    assert not (run_dir / "incidents.json").exists()
+    r = await judge_run(run_dir, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "pass" and r.incidents == []
+
+
+async def test_usage_recorded_per_chat_call(run_dir, scenario):
+    canned = {"input_tokens": 120, "output_tokens": 30}
+    chat = FakeChat([MATCH, "not json", GOOD_QUALITY], usage=canned)
+    chat.model_id = "test-model"
+    r = await judge_run(run_dir, scenario, chat)
+    assert len(chat.calls) == 3
+    assert r.usage == [{"model": "test-model", **canned}] * 3
+    assert json.loads((run_dir / "judge.json").read_text())["usage"] == r.usage
+
+
+async def test_usage_model_is_unknown_without_a_model_id(run_dir, scenario):
+    class Bare:
+        async def complete(self, messages, *, json_schema=None, temperature=None):
+            title = (json_schema or {}).get("title")
+            reply = MATCH if title == "FreeTextJudgement" else GOOD_QUALITY
+            return ChatResult(text="", json=reply, usage={})
+
+    r = await judge_run(run_dir, scenario, Bare())
+    assert r.usage == [{"model": "unknown", "input_tokens": 0, "output_tokens": 0}] * 2
+
+
+async def test_quality_prompt_includes_incidents_and_plan(tmp_path, scenario):
+    run = _run_with_incidents(
+        tmp_path, [_incident("slow_response", "agent", t_ms=4321.0, reason="answered 5 s late")]
+    )
+    plan = VariationPlan(
+        seed=1,
+        persona_id="chatty",
+        corrections=[Correction(field="phone", wrong_value="111", final_value="222")],
+        volunteer_early=["email"],
+        off_topic=[OffTopic(after_field="first_name", question="Do you validate parking?")],
+    )
+    (run / "plan.json").write_text(plan.model_dump_json(), encoding="utf-8")
+    chat = FakeChat([MATCH, GOOD_QUALITY])
+    await judge_run(run, scenario, chat)
+    prompt = "\n".join(m.content for m in chat.calls[-1])
+    assert "slow_response" in prompt and "agent" in prompt
+    assert "4321" in prompt and "answered 5 s late" in prompt
+    assert "first say 111 then correct to 222 for field phone" in prompt
+    assert "volunteered" in prompt and "email" in prompt
+    assert "Do you validate parking?" in prompt and "first_name" in prompt
+
+
+async def test_quality_prompt_without_incidents_says_none(run_dir, scenario):
+    chat = FakeChat([MATCH, GOOD_QUALITY])
+    await judge_run(run_dir, scenario, chat)
+    prompt = "\n".join(m.content for m in chat.calls[-1])
+    assert "No turn-taking incidents" in prompt
+
+
+def test_rubric_scores_five_without_corrections():
+    rubric = load_rubric()
+    assert "If the caller made no correction, score 5 and say so." in rubric
+    assert "A read-back the caller confirmed is not a correction." in rubric

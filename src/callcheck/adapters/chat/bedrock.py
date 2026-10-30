@@ -43,7 +43,7 @@ class BedrockChat(ChatModel):
         client: Any = None,
     ) -> None:
         """Use ``client`` if given; otherwise build a ``bedrock-runtime`` client for ``region``."""
-        self._model_id = model_id
+        self.model_id = model_id
         if client is None:
             import boto3
 
@@ -60,7 +60,7 @@ class BedrockChat(ChatModel):
     ) -> ChatResult:
         """Call Converse off the event loop; ``json_schema`` offers an ``emit`` tool for it."""
         request: dict[str, Any] = {
-            "modelId": self._model_id,
+            "modelId": self.model_id,
             "messages": [
                 {"role": m.role, "content": [{"text": m.content}]}
                 for m in messages

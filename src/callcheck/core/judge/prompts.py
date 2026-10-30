@@ -7,10 +7,12 @@ reply against a pydantic schema. The rubric text lives in ``rubric.md`` so it ca
 without touching code.
 """
 
+from collections.abc import Sequence
 from importlib import resources
 
 from callcheck.core.chat import Message
 from callcheck.core.scenario import FieldSpec, Scenario, VariationPlan
+from callcheck.core.turns import Incident
 
 _SYSTEM = (
     "You are an impartial evaluator of phone calls between a simulated caller and a voice agent. "
@@ -70,18 +72,44 @@ def free_text_messages(spec: FieldSpec, captured: object) -> list[Message]:
 
 
 def _plan_lines(plan: VariationPlan) -> str:
-    """Describe the corrections the caller was instructed to make, one sentence each."""
-    if not plan.corrections:
-        return "The caller was not instructed to correct anything."
-    return "\n".join(
+    """Describe everything the caller was instructed to do, one sentence per instruction."""
+    lines = [
         f"The caller was instructed to first say {c.wrong_value} then correct to "
         f"{c.final_value} for field {c.field}."
         for c in plan.corrections
+    ]
+    if not plan.corrections:
+        lines.append("The caller was not instructed to correct anything.")
+    if plan.volunteer_early:
+        lines.append(
+            "The caller volunteered these fields before being asked: "
+            f"{', '.join(plan.volunteer_early)}."
+        )
+    lines += [
+        f'The caller was instructed to ask "{q.question}" after giving {q.after_field}.'
+        for q in plan.off_topic
+    ]
+    return "\n".join(lines)
+
+
+def _incident_lines(incidents: Sequence[Incident]) -> str:
+    """List the detected turn-taking incidents, one per line, or say there were none."""
+    if not incidents:
+        return "No turn-taking incidents were detected."
+    return (
+        "Turn-taking incidents detected from the call timing (t_ms is milliseconds):\n"
+        + "\n".join(
+            f"- {i.label} ({i.attribution}) at t_ms={i.t_ms:.0f}: {i.reason}" for i in incidents
+        )
     )
 
 
 def quality_messages(
-    scenario: Scenario, transcript: str, plan: VariationPlan, rubric_text: str
+    scenario: Scenario,
+    transcript: str,
+    plan: VariationPlan,
+    rubric_text: str,
+    incidents: Sequence[Incident] = (),
 ) -> list[Message]:
     """Ask for the five 0 to 5 quality scores, each with a reason and transcript line evidence."""
     return _messages(
@@ -89,6 +117,7 @@ def quality_messages(
         f"Rubric:\n{rubric_text}\n\n"
         f"The caller's goal: {' '.join(scenario.caller_goal.split())}\n"
         f"{_plan_lines(plan)}\n\n"
+        f"{_incident_lines(incidents)}\n\n"
         f"Transcript, one numbered line per utterance:\n{transcript}\n\n"
         "Answer with a JSON object whose keys are repetition, confusion, correction_handling, "
         'clarity and closing. Each value is an object with an integer "score" from 0 to 5, a '

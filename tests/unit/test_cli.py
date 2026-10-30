@@ -45,17 +45,18 @@ def run_dirs(tmp_path) -> list[Path]:
 
 
 def test_run_with_fakes_produces_full_run_dir(tmp_path):
-    res = invoke("run", SCENARIO, *FAKES, "--persona", "self_correcting", "--skip-preflight")
+    res = invoke("run", SCENARIO, *FAKES, "--personas", "self_correcting", "--skip-preflight")
     assert res.exit_code == 0, res.output
     (run,) = run_dirs(tmp_path)
     assert {p.name for p in run.iterdir()} >= RUN_FILES
     assert run.name == "self_correcting-1" and run.parent.name.endswith("-intake-short")
-    assert "report.md" in res.output and "verdict" in res.output.lower()
+    assert "self_correcting-1" in res.output and "report.md" in res.output
+    assert "pass rate" in res.output
 
 
 def test_run_writes_the_plan_the_seed_chose(tmp_path):
     invoke(
-        "run", SCENARIO, *FAKES, "--persona", "self_correcting", "--seed", "7", "--skip-preflight"
+        "run", SCENARIO, *FAKES, "--personas", "self_correcting", "--seed", "7", "--skip-preflight"
     )
     (run,) = run_dirs(tmp_path)
     assert run.name == "self_correcting-7"
@@ -130,7 +131,7 @@ def test_caller_voice_overrides_the_brief(monkeypatch):
         "run",
         SCENARIO,
         *FAKES,
-        "--persona",
+        "--personas",
         "self_correcting",
         "--caller-voice",
         "amy",
@@ -237,7 +238,7 @@ def test_call_error_is_printed_judged_undetermined_and_exits_1(tmp_path, monkeyp
 
 
 def test_an_agent_that_fails_its_scenario_still_exits_0(tmp_path):
-    res = invoke("run", SCENARIO, *FAKES, "--persona", "self_correcting", "--skip-preflight")
+    res = invoke("run", SCENARIO, *FAKES, "--personas", "self_correcting", "--skip-preflight")
     assert res.exit_code == 0, res.output
     assert "call ended: error" not in res.output
 
@@ -257,7 +258,7 @@ def test_missing_scenario_file_is_one_line():
 
 
 def test_missing_persona_file_is_one_line():
-    res = invoke("run", SCENARIO, *FAKES, "--persona", "nobody")
+    res = invoke("run", SCENARIO, *FAKES, "--personas", "nobody")
     assert res.exit_code == 2
     assert "Persona file not found" in res.output and "Traceback" not in res.output
 
@@ -284,3 +285,107 @@ def test_report_without_judge_json_says_what_to_run(tmp_path):
     res = invoke("report", str(run))
     assert res.exit_code == 2
     assert "No judge.json in" in res.output and "callcheck judge" in res.output
+
+
+def batch_dir(tmp_path) -> Path:
+    (batch,) = (p for p in (tmp_path / "runs").iterdir() if p.is_dir())
+    return batch
+
+
+def test_run_matrix_with_two_personas_writes_batch_report(tmp_path):
+    res = invoke(
+        "run",
+        SCENARIO,
+        *FAKES,
+        "-n",
+        "4",
+        "--personas",
+        "baseline,self_correcting",
+        "--parallel",
+        "2",
+        "--skip-preflight",
+    )
+    assert res.exit_code == 0, res.output
+    assert [p.name for p in run_dirs(tmp_path)] == [
+        "baseline-1",
+        "baseline-3",
+        "self_correcting-2",
+        "self_correcting-4",
+    ]
+    batch = batch_dir(tmp_path)
+    assert (batch / "report.md").exists() and (batch / "report.json").exists()
+    meta = json.loads((batch / "batch.json").read_text())
+    assert meta["scenario"] == "intake-short" and meta["target"] == "fake"
+    assert meta["caller"] == "fake" and meta["judge"] == "fake"
+    assert meta["started"] <= meta["finished"] and isinstance(meta["bugs"], list)
+    assert "pass rate" in res.output and str(batch / "report.md") in res.output
+    for run in run_dirs(tmp_path):
+        assert {"incidents.json", "judge.json", "metrics.json", "report.md"} <= {
+            p.name for p in run.iterdir()
+        }
+
+
+def test_nova_parallel_guard():
+    args = ["run", SCENARIO, "--target", "nova-sonic", "--caller", "nova-sonic", "--judge", "fake"]
+    res = invoke(*args, "--parallel", "9")
+    assert res.exit_code == 2
+    assert "--force" in res.output and "AWS_PROFILE" not in res.output
+    # --force lifts the guard, so the run goes on to the AWS check
+    res = invoke(*args, "--parallel", "9", "--force")
+    assert res.exit_code == 2 and "AWS_PROFILE" in res.output
+
+
+def test_unknown_persona_one_line_error(tmp_path):
+    res = invoke("run", SCENARIO, *FAKES, "--personas", "baseline,nobody", "--skip-preflight")
+    assert res.exit_code == 2
+    assert "Persona file not found" in res.output and "nobody.yaml" in res.output
+    assert "Traceback" not in res.output and not (tmp_path / "runs").exists()
+
+
+def test_report_command_detects_batch_dir(tmp_path):
+    invoke("run", SCENARIO, *FAKES, "-n", "2", "--skip-preflight")
+    batch = batch_dir(tmp_path)
+    (batch / "report.md").unlink()
+    (batch / "report.json").unlink()
+    res = invoke("report", str(batch))
+    assert res.exit_code == 0, res.output
+    assert (batch / "report.md").exists() and (batch / "report.json").exists()
+
+
+def test_report_command_rejects_a_directory_with_no_runs(tmp_path):
+    res = invoke("report", str(tmp_path))
+    assert res.exit_code == 2 and "Traceback" not in res.output
+
+
+def test_judge_command_writes_incidents(tmp_path):
+    invoke("run", SCENARIO, *FAKES, "--skip-preflight")
+    (run,) = run_dirs(tmp_path)
+    for name in ("incidents.json", "judge.json", "metrics.json", "report.md"):
+        (run / name).unlink()
+    res = invoke("judge", str(run), "--judge", "fake")
+    assert res.exit_code == 0, res.output
+    assert isinstance(json.loads((run / "incidents.json").read_text()), list)
+    assert (run / "judge.json").exists() and (run / "metrics.json").exists()
+    assert (run / "report.md").exists()
+
+
+def test_metrics_are_written_after_judging_so_they_can_price_the_judge(tmp_path, monkeypatch):
+    order = []
+    for name in ("write_incidents", "write_metrics", "write_run_report"):
+        real = getattr(cli, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            order.append(_name)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(cli, name, spy)
+    real_judge = cli.judge_run
+
+    async def spy_judge(*args, **kwargs):
+        order.append("judge_run")
+        return await real_judge(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "judge_run", spy_judge)
+    res = invoke("run", SCENARIO, *FAKES, "--skip-preflight")
+    assert res.exit_code == 0, res.output
+    assert order == ["write_incidents", "judge_run", "write_metrics", "write_run_report"]

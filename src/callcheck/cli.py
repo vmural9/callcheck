@@ -10,6 +10,8 @@ options name, and prints the result.
 import asyncio
 import dataclasses
 import json
+from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,13 +30,17 @@ from callcheck.core.brief import build_brief, preflight_brief
 from callcheck.core.call import Call, CallSettings
 from callcheck.core.chat import ChatModel
 from callcheck.core.clock import MonotonicClock
+from callcheck.core.cost import load_pricing
 from callcheck.core.endpoints import AgentDefinition, Caller, CallerBrief, TargetAgent
 from callcheck.core.judge.judge import judge_run
 from callcheck.core.judge.schema import JudgeResult
 from callcheck.core.metrics import write_metrics
+from callcheck.core.monitor import TurnMonitor
 from callcheck.core.preflight import format_preflight, run_preflight
-from callcheck.core.recorder import Recorder
+from callcheck.core.recorder import Recorder, read_events
+from callcheck.core.report.aggregate import write_batch_report
 from callcheck.core.report.markdown import write_run_report
+from callcheck.core.runner import MAX_NOVA_PARALLEL, RunResult, RunSpec, expand_runs, run_matrix
 from callcheck.core.scenario import (
     Persona,
     Scenario,
@@ -45,6 +51,7 @@ from callcheck.core.scenario import (
     persona_path,
     spoken_value,
 )
+from callcheck.core.turns import detect_incidents, write_incidents
 from callcheck.reference_agent import BUGS, load_reference_agent
 
 app = typer.Typer(
@@ -216,22 +223,41 @@ def _call_error(run_dir: Path) -> str | None:
     return outcome.get("error") or "unknown error"
 
 
-async def _grade(run_dir: Path, scenario: Scenario, chat: ChatModel) -> bool:
-    """Compute metrics, judge the run, render the report and print the verdict.
+def _find_pricing() -> dict | None:
+    """Return the pricing table from the nearest ``pricing.yaml`` above this file, if any."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pricing.yaml").is_file():
+            return load_pricing(parent / "pricing.yaml")
+    return None
 
-    Returns ``False`` when the run needs attention: judging failed (credentials, throttling, a
-    bad reply; reported in one line, the recording stays on disk and ``callcheck judge`` can
-    redo it) or the call itself ended in an error, which is printed with the verdict. An agent
-    that merely fails its scenario still returns ``True``.
+
+async def _grade(
+    run_dir: Path,
+    scenario: Scenario,
+    chat: ChatModel,
+    choices: _Choices,
+    *,
+    interrupts_expected: bool,
+) -> JudgeResult | None:
+    """Find the turn-taking incidents, judge the run, price it and render its report.
+
+    The order matters: the judge reads ``incidents.json`` and the cost of judging is only known
+    once ``judge.json`` is written. Returns ``None`` after printing one line when this fails
+    (credentials, throttling, a bad reply); the recording stays on disk and ``callcheck judge``
+    can redo it.
     """
     try:
-        write_metrics(run_dir)
+        incidents = detect_incidents(
+            read_events(run_dir),
+            scenario.call,
+            caller_interrupts_expected=interrupts_expected,
+        )
+        write_incidents(run_dir, incidents)
         result = await judge_run(run_dir, scenario, chat)
-        _show_verdict(result, run_dir, write_run_report(run_dir))
-        call_error = _call_error(run_dir)
-        if call_error:
-            console.print(f"call ended: error - {escape(call_error)}", style="red", soft_wrap=True)
-            return False
+        write_metrics(
+            run_dir, _find_pricing(), agent_model=choices.target, caller_model=choices.caller
+        )
+        write_run_report(run_dir)
     except Exception as exc:
         console.print(
             f"Judging failed for {escape(str(run_dir))}: {escape(str(exc))}. "
@@ -239,23 +265,27 @@ async def _grade(run_dir: Path, scenario: Scenario, chat: ChatModel) -> bool:
             style="red",
             soft_wrap=True,
         )
-        return False
-    return True
+        return None
+    return result
 
 
-async def _one_call(
+def _note_call_error(run_dir: Path) -> bool:
+    """Print the call's error, if it ended in one, and return whether it did."""
+    call_error = _call_error(run_dir)
+    if call_error:
+        console.print(f"call ended: error - {escape(call_error)}", style="red", soft_wrap=True)
+    return call_error is not None
+
+
+async def _place_call(
     settings: Settings,
     choices: _Choices,
     scenario: Scenario,
     persona: Persona,
     plan: VariationPlan,
     run_dir: Path,
-    chat: ChatModel,
-) -> bool:
-    """Place one graded call, record it into ``run_dir``, judge it and print the verdict.
-
-    Returns whether the call and its judging went cleanly (see ``_grade``).
-    """
+) -> Path:
+    """Place one call and record it; return the run directory the recorder made."""
     names = [spec.name for spec in scenario.fields]
     brief = _with_voice(build_brief(scenario, persona, plan), choices.voice)
     channel = FakeChannel()
@@ -268,57 +298,123 @@ async def _one_call(
         choices.caller, brief, channel, settings, answers=answers, corrections=corrections
     )
     recorder = Recorder(run_dir)
-    (recorder.run_dir / "plan.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
-    (recorder.run_dir / "scenario.json").write_text(
-        scenario.model_dump_json(indent=2), encoding="utf-8"
-    )
+    for name, model in (("plan", plan), ("scenario", scenario), ("persona", persona)):
+        (recorder.run_dir / f"{name}.json").write_text(model.model_dump_json(indent=2), "utf-8")
     call = Call(
         caller=caller,
         target=target,
         sink=recorder,
         clock=MonotonicClock(),
         settings=CallSettings(max_seconds=scenario.call.max_seconds, stall_s=scenario.call.stall_s),
+        monitor=TurnMonitor(scenario.call),
     )
     await call.run()
-    return await _grade(recorder.run_dir, scenario, chat)
+    return recorder.run_dir
+
+
+def _make_place(
+    settings: Settings,
+    choices: _Choices,
+    scenario: Scenario,
+    personas: dict[str, Persona],
+    chat: ChatModel,
+) -> Callable[[RunSpec, Path], Awaitable[RunResult]]:
+    """Return the ``place(spec, run_dir)`` function ``run_matrix`` calls for each run.
+
+    A call that ends in an error is reported as ``"transport_error"`` so the matrix retries it
+    once (the mixer cannot tell a transport failure from any other endpoint failure). The
+    first attempt of such a call is not judged; the retry is, whatever its outcome, so a call
+    that fails twice still ends with a verdict and a report.
+    """
+    attempts: Counter[RunSpec] = Counter()
+
+    async def place(spec: RunSpec, run_dir: Path) -> RunResult:
+        attempts[spec] += 1
+        persona = personas[spec.persona_id]
+        plan = make_plan(scenario, persona, spec.seed)
+        made = await _place_call(settings, choices, scenario, persona, plan, run_dir)
+        if _call_error(made) and attempts[spec] == 1:
+            return "transport_error"
+        result = await _grade(
+            made, scenario, chat, choices, interrupts_expected=persona.behaviours.interrupts
+        )
+        if result is None:
+            return "error"
+        style = VERDICT_STYLE.get(result.verdict, "white")
+        console.print(f"{escape(spec.dir_name)}: [bold {style}]{result.verdict}[/]")
+        return "transport_error" if _note_call_error(made) else "ok"
+
+    return place
+
+
+def _pass_rate_line(batch_dir: Path) -> str:
+    """Return the pass rate and the other buckets of a batch, read from its ``report.json``."""
+    summary = json.loads((batch_dir / "report.json").read_text(encoding="utf-8"))
+    counts = summary["counts"]
+    graded = counts["pass"] + counts["fail"]
+    rate = summary["pass_rate"]
+    head = f"{counts['pass']}/{graded} ({rate:.0%})" if rate is not None else "n/a"
+    rest = ", ".join(f"{counts[k]} {k}" for k in ("undetermined", "artifact", "errored"))
+    return f"pass rate: {head}; {rest}"
 
 
 async def _run_batch(
     settings: Settings,
     choices: _Choices,
     scenario: Scenario,
-    persona: Persona,
-    seeds: list[int],
+    personas: dict[str, Persona],
+    specs: list[RunSpec],
+    parallel: int,
     batch_dir: Path,
     chat: ChatModel,
     preflight: bool,
 ) -> int:
-    """Run the preflight (unless skipped), then one call per seed; return the exit code.
+    """Run the preflight (unless skipped), then every call; return the exit code.
 
-    The code is 1 when any call ended in an error or any judging failed, 2 when the preflight
-    failed, and 0 otherwise (an agent that fails its scenario is still a successful run).
+    The preflight uses the voice of the first persona. The code is 1 when any call ended in an
+    error or any judging failed, 2 when the preflight failed, and 0 otherwise (an agent that
+    fails its scenario is still a successful run).
     """
     if preflight:
+        first = personas[specs[0].persona_id]
         brief = _with_voice(
-            dataclasses.replace(preflight_brief(), voice=dict(persona.voice)), choices.voice
+            dataclasses.replace(preflight_brief(), voice=dict(first.voice)), choices.voice
         )
         if not await _preflight(settings, choices, brief, batch_dir / "preflight"):
             console.print("Preflight failed; no calls were placed.", style="red")
             return EXIT_USAGE
-    clean = True
-    for seed in seeds:
-        plan = make_plan(scenario, persona, seed)
-        run_dir = batch_dir / f"{persona.id}-{seed}"
-        clean &= await _one_call(settings, choices, scenario, persona, plan, run_dir, chat)
-    return 0 if clean else 1
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "scenario": scenario.id,
+        "target": choices.target,
+        "caller": choices.caller,
+        "judge": choices.judge,
+        "bugs": sorted(choices.bugs),
+        "started": datetime.now().astimezone().isoformat(),
+        "finished": None,
+    }
+    meta_path = batch_dir / "batch.json"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    place = _make_place(settings, choices, scenario, personas, chat)
+    results = await run_matrix(specs, place, batch_dir, parallel)
+    meta["finished"] = datetime.now().astimezone().isoformat()
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    report_path = write_batch_report(batch_dir)
+    console.print(_pass_rate_line(batch_dir))
+    console.print(f"report:  {escape(str(report_path))}", soft_wrap=True)
+    return 0 if all(result == "ok" for result in results.values()) else 1
 
 
-def _load_inputs(scenario_path: Path, persona_id: str) -> tuple[Scenario, Persona]:
-    """Load the scenario and persona, exiting with one line if a file or a field is wrong."""
-    persona_file = persona_path(scenario_path, persona_id)
-    for kind, path in (("Scenario", scenario_path), ("Persona", persona_file)):
+def _load_inputs(
+    scenario_path: Path, persona_ids: list[str]
+) -> tuple[Scenario, dict[str, Persona]]:
+    """Load the scenario and every persona, exiting with one line if a file or a field is wrong."""
+    files = {pid: persona_path(scenario_path, pid) for pid in persona_ids}
+    if not scenario_path.is_file():
+        raise _fail(f"Scenario file not found: {scenario_path}")
+    for path in files.values():
         if not path.is_file():
-            raise _fail(f"{kind} file not found: {path}")
+            raise _fail(f"Persona file not found: {path}")
     scenario = load_scenario(scenario_path)
     try:
         load_reference_agent([spec.name for spec in scenario.fields])
@@ -326,7 +422,15 @@ def _load_inputs(scenario_path: Path, persona_id: str) -> tuple[Scenario, Person
         raise _fail(
             f"Scenario field {exc.args[0]!r} is not defined by the reference agent's intake.yaml"
         ) from exc
-    return scenario, load_persona(persona_file)
+    return scenario, {pid: load_persona(path) for pid, path in files.items()}
+
+
+def _parse_personas(csv: str) -> list[str]:
+    """Return the persona ids in ``csv``, or exit if it names none."""
+    ids = [name.strip() for name in csv.split(",") if name.strip()]
+    if not ids:
+        raise _fail("--personas needs at least one persona id")
+    return ids
 
 
 @app.command()
@@ -335,13 +439,26 @@ def run(
     target: TargetOption,
     caller: CallerOption,
     caller_voice: VoiceOption = None,
-    persona: Annotated[
-        str, typer.Option(help="Persona id: personas/<id>.yaml beside the scenario.")
+    personas: Annotated[
+        str,
+        typer.Option(
+            help="Comma list of persona ids (personas/<id>.yaml beside the scenario); "
+            "call i uses the (i mod count)th."
+        ),
     ] = "baseline",
     n: Annotated[
         int, typer.Option("-n", min=1, help="Number of calls, with consecutive seeds.")
     ] = 1,
     seed: Annotated[int, typer.Option(help="Seed of the first call; later calls add one.")] = 1,
+    parallel: Annotated[
+        int, typer.Option("--parallel", min=1, help="How many calls to place at once.")
+    ] = 1,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force", help=f"Allow more than {MAX_NOVA_PARALLEL} parallel Nova Sonic calls."
+        ),
+    ] = False,
     judge: JudgeOption = None,
     skip_preflight: Annotated[
         bool, typer.Option("--skip-preflight", help="Do not check first that both sides can hear.")
@@ -354,7 +471,7 @@ def run(
         bool, typer.Option("--fix-bugs", help="Plant no bugs in the reference agent.")
     ] = False,
 ) -> None:
-    """Place simulated calls against an agent, record them, and grade each one."""
+    """Place simulated calls against an agent, record them, grade each, and report the batch."""
     settings = load_settings()
     choices = _Choices(
         target=_check_name(target, TARGETS, "--target"),
@@ -363,18 +480,36 @@ def run(
         voice=caller_voice,
         bugs=_parse_bugs(bugs, fix_bugs),
     )
+    if (
+        parallel > MAX_NOVA_PARALLEL
+        and not force
+        and {choices.target, choices.caller} == {"nova-sonic"}
+    ):
+        raise _fail(
+            f"--parallel {parallel} is above {MAX_NOVA_PARALLEL}, the most Nova Sonic sessions "
+            "run at once without throttling; pass --force to go on."
+        )
     _need_aws(
         settings,
         nova_sonic="nova-sonic" in (choices.target, choices.caller),
         bedrock_judge=choices.judge == "bedrock",
     )
-    scenario, persona_def = _load_inputs(scenario_path, persona)
+    persona_ids = _parse_personas(personas)
+    scenario, persona_defs = _load_inputs(scenario_path, persona_ids)
     chat = _make_judge(choices.judge, settings)
     batch_dir = settings.runs_dir / f"{_stamp()}-{scenario.id}"
-    seeds = [seed + i for i in range(n)]
+    specs = expand_runs(persona_ids, n, seed)
     code = asyncio.run(
         _run_batch(
-            settings, choices, scenario, persona_def, seeds, batch_dir, chat, not skip_preflight
+            settings,
+            choices,
+            scenario,
+            persona_defs,
+            specs,
+            parallel,
+            batch_dir,
+            chat,
+            not skip_preflight,
         )
     )
     raise typer.Exit(code)
@@ -406,30 +541,67 @@ def _load_run(run_dir: Path) -> Scenario:
     return Scenario.model_validate_json(saved.read_text(encoding="utf-8"))
 
 
+def _interrupts_expected(run_dir: Path) -> bool:
+    """Say whether the run's persona interrupts on purpose; ``False`` if the run saved none."""
+    saved = run_dir / "persona.json"
+    if not saved.exists():
+        return False
+    return Persona.model_validate_json(saved.read_text(encoding="utf-8")).behaviours.interrupts
+
+
+def _endpoints_of(run_dir: Path) -> tuple[str, str]:
+    """Return the target and caller names the run's batch recorded, for pricing it again."""
+    try:
+        meta = json.loads((run_dir.resolve().parent / "batch.json").read_text(encoding="utf-8"))
+        return str(meta["target"]), str(meta["caller"])
+    except (OSError, ValueError, KeyError):
+        return "nova-sonic", "nova-sonic"
+
+
 @app.command()
 def judge(
     run_dir: Annotated[Path, typer.Argument(help="Run directory to grade again.")],
     judge: JudgeOption = None,
 ) -> None:
-    """Grade a recorded run again and rewrite its judge.json and report.md."""
+    """Find a recorded run's incidents again, grade it, and rewrite its files and report."""
     settings = load_settings()
     scenario = _load_run(run_dir)
     name = _check_name(judge or settings.judge, CHAT, "--judge")
     _need_aws(settings, nova_sonic=False, bedrock_judge=name == "bedrock")
     chat = _make_judge(name, settings)
-    if not asyncio.run(_grade(run_dir, scenario, chat)):
+    target, caller = _endpoints_of(run_dir)
+    choices = _Choices(target, caller, name, voice=None, bugs=frozenset())
+    result = asyncio.run(
+        _grade(run_dir, scenario, chat, choices, interrupts_expected=_interrupts_expected(run_dir))
+    )
+    if result is None:
         raise typer.Exit(1)
+    _show_verdict(result, run_dir, run_dir / "report.md")
+    if _note_call_error(run_dir):
+        raise typer.Exit(1)
+
+
+def _has_runs(directory: Path) -> bool:
+    """Say whether ``directory`` holds run directories (each has an ``outcome.json``)."""
+    return any((p / "outcome.json").is_file() for p in directory.iterdir() if p.is_dir())
 
 
 @app.command()
 def report(
-    run_dir: Annotated[Path, typer.Argument(help="Run directory to render the report for.")],
+    directory: Annotated[
+        Path, typer.Argument(help="A run directory, or a batch directory of runs.")
+    ],
 ) -> None:
-    """Render report.md again from a run's existing judge.json and metrics.json."""
-    _load_run(run_dir)
-    if not (run_dir / "judge.json").exists():
-        raise _fail(f"No judge.json in {run_dir}; run callcheck judge {run_dir} first.")
-    console.print(f"report:  {escape(str(write_run_report(run_dir)))}", soft_wrap=True)
+    """Render a run's report.md, or a batch's report.md and report.json, again from its files."""
+    if (directory / "judge.json").exists():
+        path = write_run_report(directory)
+    elif directory.is_dir() and _has_runs(directory):
+        path = write_batch_report(directory)
+    elif (directory / "outcome.json").is_file():
+        raise _fail(f"No judge.json in {directory}; run callcheck judge {directory} first.")
+    else:
+        raise _fail(f"{directory} is neither a run directory nor a batch directory of runs.")
+    console.print(f"report:  {escape(str(path))}", soft_wrap=True)
 
 
 @app.command()

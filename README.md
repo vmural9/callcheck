@@ -21,7 +21,7 @@ uv sync --extra bedrock
 cp .env.example .env        # then set AWS_PROFILE (and AWS_REGION if not us-west-2)
 uv run callcheck preflight --target nova-sonic --caller nova-sonic
 uv run callcheck run scenarios/intake_short.yaml --target nova-sonic --caller nova-sonic \
-    --persona self_correcting
+    --personas self_correcting
 ```
 
 `preflight` checks that the two sides can hear each other. `run` places the call, then writes a

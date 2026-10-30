@@ -80,3 +80,14 @@ def test_metrics_includes_cost(tmp_path):
     assert m.cost is not None and m.cost.agent.usd == 2.0 and m.cost.judge.usd == 4.0
     assert m.ttfa_p90_ms == 1200 and m.ttfa_p99_ms == 1200
     assert write_metrics(tmp_path).cost is None
+
+
+def test_p50_is_nearest_rank_so_it_agrees_with_the_batch_report():
+    evs = [
+        CallEvent(1000, "caller", "speech_end", {}),
+        CallEvent(1100, "agent", "audio_start", {}),
+        CallEvent(2000, "caller", "speech_end", {}),
+        CallEvent(2200, "agent", "audio_start", {}),
+    ]
+    m = compute_metrics(evs, {"duration_ms": 3000})
+    assert m.ttfa_ms == [100, 200] and m.ttfa_p50_ms == percentile(m.ttfa_ms, 50) == 100

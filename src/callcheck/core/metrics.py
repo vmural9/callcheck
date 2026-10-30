@@ -9,7 +9,6 @@ run files.
 
 import json
 import math
-import statistics
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -86,7 +85,7 @@ def compute_metrics(events: list[CallEvent], outcome: dict) -> Metrics:
     return Metrics(
         greeting_latency_ms=_greeting_latency(events),
         ttfa_ms=gaps,
-        ttfa_p50_ms=statistics.median(gaps) if gaps else None,
+        ttfa_p50_ms=percentile(gaps, 50),
         ttfa_p90_ms=percentile(gaps, 90),
         ttfa_p99_ms=percentile(gaps, 99),
         ttfa_max_ms=max(gaps) if gaps else None,

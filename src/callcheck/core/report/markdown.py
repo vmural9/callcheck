@@ -12,19 +12,9 @@ from pathlib import Path
 
 from callcheck.core.judge.schema import JudgeResult
 from callcheck.core.metrics import Metrics
+from callcheck.core.report.format import PARTIAL_NOTE, UNVERIFIED_NOTE, cell, ms, usd
 
 _FILES = ("transcript.md", "call.wav", "judge.json", "events.jsonl")
-
-
-def _cell(value: object) -> str:
-    """Format a value for a table cell, escaping pipes and flattening line breaks."""
-    text = "" if value is None else str(value)
-    return " ".join(text.split()).replace("|", "\\|")
-
-
-def _ms(value: float | None) -> str:
-    """Format milliseconds with no decimals, or ``n/a`` when there is no value."""
-    return "n/a" if value is None else f"{round(value)} ms"
 
 
 def _verdict_section(judge: JudgeResult, outcome: dict) -> list[str]:
@@ -35,11 +25,11 @@ def _verdict_section(judge: JudgeResult, outcome: dict) -> list[str]:
         "",
         f"- Verdict: **{judge.verdict}**",
         f"- Failure types: {failures}",
-        f"- Summary: {_cell(judge.summary)}",
+        f"- Summary: {cell(judge.summary)}",
         f"- Call ended: {outcome.get('reason', 'unknown')}",
     ]
     if outcome.get("error"):
-        lines.append(f"- Call error: {_cell(outcome['error'])}")
+        lines.append(f"- Call error: {cell(outcome['error'])}")
     return lines
 
 
@@ -53,7 +43,7 @@ def _fields_section(judge: JudgeResult) -> list[str]:
     ]
     for f in judge.fields:
         cells = (f.name, f.expected, f.captured, f.verdict, f.method, f.note)
-        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+        lines.append("| " + " | ".join(cell(c) for c in cells) + " |")
     return lines
 
 
@@ -65,7 +55,7 @@ def _quality_section(judge: JudgeResult) -> list[str]:
         return lines
     lines += ["| dimension | score | reason |", "| --- | --- | --- |"]
     for name, item in judge.quality:
-        lines.append(f"| {name} | {item.score} | {_cell(item.reason)} |")
+        lines.append(f"| {name} | {item.score} | {cell(item.reason)} |")
     return lines
 
 
@@ -74,11 +64,45 @@ def _latency_section(metrics: Metrics) -> list[str]:
     return [
         "## Latency",
         "",
-        f"- Greeting latency: {_ms(metrics.greeting_latency_ms)}",
-        f"- TTFA p50: {_ms(metrics.ttfa_p50_ms)}",
-        f"- TTFA max: {_ms(metrics.ttfa_max_ms)}",
+        f"- Greeting latency: {ms(metrics.greeting_latency_ms)}",
+        f"- TTFA p50: {ms(metrics.ttfa_p50_ms)}",
+        f"- TTFA max: {ms(metrics.ttfa_max_ms)}",
         f"- Agent turns measured: {len(metrics.ttfa_ms)}",
     ]
+
+
+def _incidents_section(judge: JudgeResult) -> list[str]:
+    """Render the turn-taking incidents the detector found, or ``none``."""
+    lines = ["## Turn-taking incidents", ""]
+    if not judge.incidents:
+        return [*lines, "none"]
+    lines += [
+        "| time | label | attribution | confidence | reason |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for inc in judge.incidents:
+        cells = (f"{inc.t_ms / 1000:.1f} s", inc.label, inc.attribution, inc.confidence, inc.reason)
+        lines.append("| " + " | ".join(cell(c) for c in cells) + " |")
+    return lines
+
+
+def _cost_section(metrics: Metrics) -> list[str]:
+    """Render what the call cost per party, with footnotes for partial or unverified prices."""
+    lines = ["## Cost", ""]
+    cost = metrics.cost
+    if cost is None:
+        return [*lines, "n/a"]
+    lines += ["| party | cost | note |", "| --- | --- | --- |"]
+    for name in ("agent", "caller", "judge"):
+        line = getattr(cost, name)
+        lines.append(f"| {name} | {usd(line.usd, line.partial)} | {cell(line.note)} |")
+    lines.append(f"| total | {usd(cost.total_usd, cost.partial)} | |")
+    notes = []
+    if cost.partial or any(getattr(cost, n).partial for n in ("agent", "caller", "judge")):
+        notes.append(PARTIAL_NOTE)
+    if any(getattr(cost, n).unverified for n in ("agent", "caller", "judge")):
+        notes.append(UNVERIFIED_NOTE)
+    return [*lines, "", *notes] if notes else lines
 
 
 def render_run_report(run_dir: Path) -> str:
@@ -92,7 +116,8 @@ def render_run_report(run_dir: Path) -> str:
         _fields_section(judge),
         _quality_section(judge),
         _latency_section(metrics),
-        ["## Cost", "", "n/a until M2"],
+        _incidents_section(judge),
+        _cost_section(metrics),
         ["## Files", "", *(f"- [{name}]({name})" for name in _FILES)],
     ]
     return "\n\n".join("\n".join(section) for section in sections) + "\n"

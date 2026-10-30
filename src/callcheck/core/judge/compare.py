@@ -41,6 +41,8 @@ _DIGIT_WORDS = {
     "eight": "8",
     "nine": "9",
 }
+_NEGATIONS = frozenset({"not", "no", "never", "isn"})
+_NEGATION_WINDOW = 3
 _DIGIT_RUN = re.compile(rf"\b(?:{'|'.join(_DIGIT_WORDS)})(?: (?:{'|'.join(_DIGIT_WORDS)}))+\b")
 
 Outcome = tuple[Verdict, str]
@@ -100,12 +102,28 @@ def _equal(same: bool, note: str) -> Outcome:
     return ("match" if same else "mismatch"), note
 
 
+def _digit_tokens(s: str) -> list[str]:
+    """Return the sorted digit runs of ``s``, counting a lone spoken digit word as its digit."""
+    tokens = []
+    for word in normalize_text(s).split():
+        if word in _DIGIT_WORDS and word != "oh":
+            tokens.append(_DIGIT_WORDS[word])
+        else:
+            tokens.extend(re.findall(r"\d+", word))
+    return sorted(tokens)
+
+
 def _compare_similar(spec: FieldSpec, captured: Any) -> Outcome:
     """Grade a name or text field by similarity bands, shifted by ``spec.tolerance``."""
     match_at = spec.tolerance if spec.tolerance is not None else _MATCH_RATIO
     near_at = match_at - _BAND_WIDTH if spec.tolerance is not None else _NEAR_MISS_RATIO
     ratio = similarity(str(spec.expected), str(captured))
     note = f"similarity {ratio:.2f} (match at {match_at:.2f}, near miss at {near_at:.2f})"
+    want_digits = _digit_tokens(str(spec.expected))
+    got_digits = _digit_tokens(str(captured))
+    if want_digits != got_digits:
+        note = f"digits differ: {want_digits} vs {got_digits}; {note}"
+        return ("near_miss" if ratio >= near_at else "mismatch"), note
     if ratio >= match_at:
         return "match", note
     return ("near_miss" if ratio >= near_at else "mismatch"), note
@@ -173,6 +191,13 @@ def _phrase_in(phrase: str, text: str) -> bool:
     return bool(phrase) and f" {phrase} " in f" {text} "
 
 
+def _negated(phrase: str, text: str) -> bool:
+    """Report whether a negation word sits within three tokens before ``phrase`` in ``text``."""
+    padded = f" {text} "
+    head = padded[: padded.index(f" {phrase} ")].split()
+    return any(word in _NEGATIONS for word in head[-_NEGATION_WINDOW:])
+
+
 def _compare_enum(spec: FieldSpec, captured: Any) -> Outcome:
     """Match the captured value against the expected key or any of its synonyms.
 
@@ -191,7 +216,10 @@ def _compare_enum(spec: FieldSpec, captured: Any) -> Outcome:
     for option in dict.fromkeys([key, *synonyms]):
         phrases = {normalize_text(option)}
         phrases.update(normalize_text(s) for s in synonyms.get(option, []))
-        if any(_phrase_in(p, got) for p in phrases):
+        hits = [p for p in phrases if _phrase_in(p, got)]
+        if any(_negated(p, got) for p in hits):
+            return "undetermined", f"{got!r} negates the phrase for {option!r}"
+        if hits:
             found.append(option)
     if len(found) == 1:
         verdict = "match" if found[0] == key else "mismatch"

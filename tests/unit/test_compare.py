@@ -113,3 +113,30 @@ def test_enum_two_options_stays_mismatch():
     out = compare_field(_visit_type(), "new patient follow up", "result")
     assert out.verdict == "mismatch"
     assert "new_patient" in out.note and "follow_up" in out.note
+
+
+LONG_ADDRESS = "two one eight valencia street apartment four b san francisco"
+
+
+def test_long_address_one_digit_off_does_not_match():
+    assert V(P("text", LONG_ADDRESS), LONG_ADDRESS) == "match"
+    off = LONG_ADDRESS.replace("four", "nine")
+    assert V(P("text", LONG_ADDRESS), off) != "match"
+    assert "digits differ" in compare_field(P("text", LONG_ADDRESS), off, "result").note
+
+
+def test_spoken_digit_differs_is_not_match():
+    assert V(P("text", "218 valencia street"), "two one nine valencia street") != "match"
+
+
+def test_dr_smith_not_drive_smith():
+    assert V(P("name", "dr smith"), "drive smith") != "match"
+
+
+def test_enum_negation_is_undetermined():
+    assert V(_visit_type(), "not a new patient") == "undetermined"
+    assert V(_visit_type(), "this isn't a new patient") == "undetermined"
+
+
+def test_enum_only_other_option_phrase_is_mismatch():
+    assert V(_visit_type(), "returning patient visit") == "mismatch"

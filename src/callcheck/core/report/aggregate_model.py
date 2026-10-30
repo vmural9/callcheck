@@ -92,6 +92,7 @@ class BatchSummary(BaseModel):
     finished: str | None = None
     wall_seconds: float | None = None
     n: int
+    transcripts: list[str] = []
     counts: dict[str, int]
     pass_rate: float | None
     runs: list[RunRow]

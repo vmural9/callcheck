@@ -92,6 +92,7 @@ def make_run(
         agent_turns=1,
         cost=_cost() if cost == "default" else cost,
     )
+    (run / "transcript.md").write_text("transcript", encoding="utf-8")
     (run / "judge.json").write_text(judge.model_dump_json(), encoding="utf-8")
     (run / "metrics.json").write_text(metrics.model_dump_json(), encoding="utf-8")
     (run / "outcome.json").write_text(
@@ -200,8 +201,8 @@ def test_errored_run_listed_not_counted(tmp_path):
     assert summary.n == 3 and summary.counts["errored"] == 2 and summary.counts["pass"] == 1
     md = render_batch_report(summary)
     assert "1/1 (100%)" in md
-    assert "[a-2](a-2/transcript.md): stream closed" in md
-    assert "[a-3](a-3/transcript.md)" in md
+    assert "- [a-2](a-2/): stream closed" in md
+    assert "- [a-3](a-3/): no judge.json" in md
 
 
 def test_zero_graded_runs_renders_na(tmp_path):
@@ -229,8 +230,14 @@ def test_cost_na_and_unverified_footnote(tmp_path):
     make_run(other, "a-1", cost=_cost())
     make_run(other, "a-2", cost=None)
     md = render_batch_report(summarize_batch(other))
+    assert "| agent | ≥ $0.10 | ≥ $0.10 |" in md and "- Total cost: ≥ $0.17" in md
+    assert "a partial sum" in md and "Prices are unverified" not in md
+
+    nothing = tmp_path / "nothing"
+    nothing.mkdir()
+    make_run(nothing, "a-1", cost=None)
+    md = render_batch_report(summarize_batch(nothing))
     assert "| agent | n/a | n/a |" in md and "- Total cost: n/a" in md
-    assert "Prices are unverified" not in md
 
     partial = tmp_path / "partial"
     partial.mkdir()
@@ -261,3 +268,62 @@ def test_report_json_matches_summary(tmp_path):
     assert path.read_text(encoding="utf-8") == render_batch_report(summary)
     write_batch_report(batch)  # a report left in the batch dir is not a run
     assert summarize_batch(batch).n == 2
+
+
+def test_incidents_json_takes_precedence_over_judge_incidents(tmp_path):
+    batch = _batch(tmp_path)
+    in_judge = Incident(
+        t_ms=1, label="slow_response", attribution="agent", confidence="high", reason="r"
+    )
+    on_disk = Incident(
+        t_ms=2, label="double_talk", attribution="simulator", confidence="low", reason="r"
+    )
+    run = make_run(batch, "a-1", incidents=[in_judge])
+    (run / "incidents.json").write_text(json.dumps([on_disk.model_dump()]), encoding="utf-8")
+    summary = summarize_batch(batch)
+    assert [(i.label, i.attribution) for i in summary.incidents] == [("double_talk", "simulator")]
+
+
+def test_malformed_incidents_json_falls_back_to_judge_incidents(tmp_path):
+    batch = _batch(tmp_path)
+    in_judge = Incident(
+        t_ms=1, label="slow_response", attribution="agent", confidence="high", reason="r"
+    )
+    run = make_run(batch, "a-1", incidents=[in_judge])
+    (run / "incidents.json").write_text(json.dumps([{"label": "nonsense"}]), encoding="utf-8")
+    other = make_run(batch, "a-2", incidents=[in_judge])
+    (other / "incidents.json").write_text("{not json", encoding="utf-8")
+    summary = summarize_batch(batch)
+    assert [(i.label, i.count) for i in summary.incidents] == [("slow_response", 2)]
+
+
+def test_corrupt_judge_json_is_errored_with_the_reason(tmp_path):
+    batch = _batch(tmp_path)
+    run = make_run(batch, "a-1")
+    (run / "judge.json").write_text("{broken", encoding="utf-8")
+    summary = summarize_batch(batch)
+    assert summary.counts["errored"] == 1
+    assert "judge.json unreadable:" in (summary.runs[0].error or "")
+    assert "- [a-1](a-1/transcript.md): judge.json unreadable:" in render_batch_report(summary)
+
+
+def test_percentages_round_half_up(tmp_path):
+    from callcheck.core.report.aggregate_render import _rate
+
+    assert _rate(1, 8) == "1/8 (13%)" and _rate(1, 200) == "1/200 (1%)"
+    assert _rate(1, 3) == "1/3 (33%)" and _rate(0, 0) == "n/a"
+
+
+def test_artifact_runs_leave_field_accuracy_but_keep_failure_types(tmp_path):
+    batch = _batch(tmp_path)
+    make_run(batch, "a-1", "pass", fields=[_field(verdict="match")])
+    make_run(
+        batch,
+        "a-2",
+        "artifact",
+        ["no_response"],
+        fields=[_field(verdict="missing", captured=None)],
+    )
+    md = render_batch_report(summarize_batch(batch))
+    assert "| date | 1/1 (100%) | - |" in md
+    assert "| no_response | 1 | [a-2](a-2/transcript.md) |" in md

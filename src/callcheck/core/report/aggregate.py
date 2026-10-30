@@ -57,26 +57,46 @@ def _read_json(path: Path) -> object | None:
         return None
 
 
-def _read_model[M: BaseModel](path: Path, model: type[M]) -> M | None:
+def _read_judge(path: Path) -> tuple[JudgeResult | None, str | None]:
+    """Return the judge result, or why there is none (a missing file is not a problem)."""
     try:
-        return model.model_validate_json(path.read_text(encoding="utf-8"))
+        return JudgeResult.model_validate_json(path.read_text(encoding="utf-8")), None
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValidationError) as exc:
+        return None, f"judge.json unreadable: {' '.join(str(exc).split())}"
+
+
+def _read_metrics(path: Path) -> Metrics | None:
+    try:
+        return Metrics.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValidationError):
         return None
 
 
+def _read_incidents(path: Path) -> list[Incident] | None:
+    """Return the incidents in ``path``, or ``None`` if it is missing or malformed."""
+    raw = _read_json(path)
+    if not isinstance(raw, list):
+        return None
+    try:
+        return [Incident.model_validate(item) for item in raw]
+    except ValidationError:
+        return None
+
+
 def _load_run(run_dir: Path) -> _Run:
-    judge = _read_model(run_dir / "judge.json", JudgeResult)
+    judge, unreadable = _read_judge(run_dir / "judge.json")
     outcome = _read_json(run_dir / "outcome.json")
     outcome = outcome if isinstance(outcome, dict) else {}
-    raw = _read_json(run_dir / "incidents.json")
-    incidents = [Incident.model_validate(i) for i in raw] if isinstance(raw, list) else None
+    incidents = _read_incidents(run_dir / "incidents.json")
     error = None
     if judge is None:
-        error = outcome.get("error") or "no judge result"
+        error = unreadable or outcome.get("error") or "no judge.json"
     return _Run(
         name=run_dir.name,
         judge=judge,
-        metrics=_read_model(run_dir / "metrics.json", Metrics),
+        metrics=_read_metrics(run_dir / "metrics.json"),
         incidents=incidents if incidents is not None else (judge.incidents if judge else []),
         error=error,
     )
@@ -118,6 +138,12 @@ def _failures(judged: list[_Run]) -> list[FailureRow]:
 
 
 def _fields(judged: list[_Run]) -> list[FieldRow]:
+    """Tally field matches over judged runs; artifact runs are left out.
+
+    An artifact call ended because of the simulator, so what the agent captured in it says
+    nothing about the agent. Their failure types still count under "Failures by type".
+    """
+    judged = [run for run in judged if run.judge.verdict != "artifact"]
     graded: Counter[str] = Counter()
     matched: Counter[str] = Counter()
     wrong: dict[str, Counter[str]] = {}
@@ -195,25 +221,27 @@ def _worst(rows: list[RunRow]) -> list[RunRow]:
 
 
 def _cost(runs: list[_Run]) -> CostSummary:
+    """Sum the priced cost lines; a run that lacks one makes that row partial, not n/a."""
     costs: list[Cost | None] = [run.metrics.cost if run.metrics else None for run in runs]
     rows = []
     for party in _PARTIES:
         lines = [getattr(c, party) if c else None for c in costs]
-        known = len(lines) > 0 and all(line is not None and line.usd is not None for line in lines)
-        total = sum(line.usd for line in lines) if known else None
+        priced = [line for line in lines if line is not None and line.usd is not None]
+        total = sum(line.usd for line in priced) if priced else None
         rows.append(
             CostRow(
                 party=party,
                 total_usd=total,
-                mean_usd=total / len(lines) if known else None,
-                partial=any(line is not None and line.partial for line in lines),
+                mean_usd=total / len(priced) if priced else None,
+                partial=len(priced) < len(lines) or any(line.partial for line in priced),
             )
         )
-    all_costed = bool(costs) and all(c is not None and c.total_usd is not None for c in costs)
+    priced_totals = [c.total_usd for c in costs if c is not None and c.total_usd is not None]
     return CostSummary(
         rows=rows,
-        total_usd=sum(c.total_usd for c in costs) if all_costed else None,
-        total_partial=any(c is not None and c.partial for c in costs),
+        total_usd=sum(priced_totals) if priced_totals else None,
+        total_partial=len(priced_totals) < len(costs)
+        or any(c is not None and c.partial for c in costs),
         unverified=any(getattr(c, p).unverified for c in costs if c is not None for p in _PARTIES),
     )
 
@@ -246,6 +274,7 @@ def summarize_batch(batch_dir: Path) -> BatchSummary:
         finished=batch.get("finished"),
         wall_seconds=_wall_seconds(batch),
         n=len(runs),
+        transcripts=[run.name for run in runs if (batch_dir / run.name / "transcript.md").exists()],
         counts=counts,
         pass_rate=counts["pass"] / graded if graded else None,
         runs=rows,

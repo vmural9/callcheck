@@ -4,8 +4,11 @@ from callcheck.core.report.aggregate_model import BatchSummary
 from callcheck.core.report.format import PARTIAL_NOTE, UNVERIFIED_NOTE, cell, ms, usd
 
 
-def _link(name: str | None) -> str:
-    return "n/a" if name is None else f"[{name}]({name}/transcript.md)"
+def _link(s: BatchSummary, name: str | None) -> str:
+    """Link a run's transcript if it has one, otherwise its directory."""
+    if name is None:
+        return "n/a"
+    return f"[{name}]({name}/transcript.md)" if name in s.transcripts else f"[{name}]({name}/)"
 
 
 def _num(value: float | None) -> str:
@@ -13,7 +16,10 @@ def _num(value: float | None) -> str:
 
 
 def _rate(matched: int, graded: int) -> str:
-    return f"{matched}/{graded} ({round(100 * matched / graded)}%)" if graded else "n/a"
+    if not graded:
+        return "n/a"
+    percent = (200 * matched + graded) // (2 * graded)  # half-up, not banker's rounding
+    return f"{matched}/{graded} ({percent}%)"
 
 
 def _duration(seconds: float | None) -> str:
@@ -54,7 +60,7 @@ def _summary(s: BatchSummary) -> list[str]:
     errored = [r for r in s.runs if r.verdict == "errored"]
     if errored:
         lines += ["", "Errored runs (no judge result, not counted in the pass rate):", ""]
-        lines += [f"- {_link(r.name)}: {cell(r.error)}" for r in errored]
+        lines += [f"- {_link(s, r.name)}: {cell(r.error)}" for r in errored]
     return lines
 
 
@@ -62,7 +68,7 @@ def _failures(s: BatchSummary) -> list[str]:
     lines = ["## Failures by type", ""]
     if not s.failures:
         return [*lines, "none"]
-    rows = [(f.type, f.count, _link(f.example)) for f in s.failures]
+    rows = [(f.type, f.count, _link(s, f.example)) for f in s.failures]
     return lines + _table(("type", "runs", "example"), rows, 2)
 
 
@@ -79,7 +85,8 @@ def _quality(s: BatchSummary) -> list[str]:
     if not s.quality:
         return [*lines, "n/a"]
     rows = [
-        (q.dimension, _num(q.mean), f"{_link(q.lowest_run)} ({q.lowest_score})") for q in s.quality
+        (q.dimension, _num(q.mean), f"{_link(s, q.lowest_run)} ({q.lowest_score})")
+        for q in s.quality
     ]
     return lines + _table(("dimension", "mean", "lowest run"), rows, 2)
 
@@ -93,7 +100,7 @@ def _latency(s: BatchSummary) -> list[str]:
         f"- TTFA p50: {ms(lat.p50_ms)}",
         f"- TTFA p90: {ms(lat.p90_ms)}",
         f"- TTFA p99: {ms(lat.p99_ms)}",
-        f"- TTFA max: {ms(lat.max_ms)} (slowest turn: {_link(lat.slowest_run)})",
+        f"- TTFA max: {ms(lat.max_ms)} (slowest turn: {_link(s, lat.slowest_run)})",
     ]
 
 
@@ -109,7 +116,7 @@ def _worst(s: BatchSummary) -> list[str]:
     lines = ["## Worst three runs", ""]
     if not s.worst:
         return [*lines, "none"]
-    rows = [(r.verdict, ", ".join(r.failure_types) or "none", _link(r.name)) for r in s.worst]
+    rows = [(r.verdict, ", ".join(r.failure_types) or "none", _link(s, r.name)) for r in s.worst]
     return lines + _table(("verdict", "failure types", "run"), rows, 2)
 
 

@@ -42,10 +42,11 @@ def extraction_messages(scenario: Scenario, transcript: str) -> list[Message]:
     names = "\n".join(f"- {spec.name} ({spec.type})" for spec in scenario.fields)
     return _messages(
         "Below is a transcript of a call in which the AGENT collects information from the "
-        "CALLER. For each field listed, give the value the AGENT recorded or confirmed by the "
-        "end of the call, using the caller's final value if the caller corrected it. Report what "
-        "the agent said it had, even if it is wrong. Use null for a field the agent never "
-        "captured.\n\n"
+        "CALLER. For each field listed, give the value the agent last stated, or confirmed it had "
+        "recorded, by the end of the call. Take it from the AGENT's words, even if the caller "
+        "corrected it and the agent ignored the correction, and even if it is wrong. Never "
+        "substitute what the caller said. Use null for a field the agent never stated or "
+        "confirmed.\n\n"
         f"Fields:\n{names}\n\n"
         f"Transcript:\n{transcript}\n\n"
         'Answer with JSON of the form {"fields": {"<field name>": "<value or null>"}}, '

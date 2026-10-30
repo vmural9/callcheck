@@ -157,7 +157,9 @@ async def test_transcript_extraction_when_no_result_event(run_dir_no_result, sce
     assert r.captured_method == "transcript" and r.verdict == "fail"
     assert r.failure_types == ["field_missing"]
     assert {f.method for f in r.fields} == {"transcript"}
-    assert "first_name" in "\n".join(m.content for m in chat.calls[0])
+    asked = "\n".join(m.content for m in chat.calls[0])
+    assert "first_name" in asked
+    assert "the agent last stated" in asked and "caller's final value" not in asked
 
 
 async def test_failed_extraction_is_undetermined_not_missing(run_dir_no_result, scenario):
@@ -208,6 +210,24 @@ async def test_fake_chat_records_calls_and_raises_when_exhausted():
     assert len(chat.calls) == 2
     with pytest.raises(AssertionError, match="FakeChat exhausted"):
         await chat.complete([])
+
+
+async def test_max_wrong_tolerates_a_mismatch_without_listing_it(tmp_path, scenario):
+    run = _write_run(tmp_path / "tolerated", fields=dict(GOOD_FIELDS, phone="415 555 0143"))
+    criteria = scenario.pass_criteria.model_copy(update={"max_wrong": 1})
+    tolerant = scenario.model_copy(update={"pass_criteria": criteria})
+    r = await judge_run(run, tolerant, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "pass" and r.failure_types == []
+    assert next(f for f in r.fields if f.name == "phone").verdict == "mismatch"
+
+
+async def test_unknown_required_field_is_rejected(run_dir, scenario):
+    criteria = scenario.pass_criteria.model_copy(update={"required": ["phone", "fone"]})
+    typo = scenario.model_copy(update={"pass_criteria": criteria})
+    chat = FakeChat([])
+    with pytest.raises(ValueError, match="unknown required field: fone"):
+        await judge_run(run_dir, typo, chat)
+    assert chat.calls == []
 
 
 def test_make_chat_builds_fake_and_rejects_unknown():

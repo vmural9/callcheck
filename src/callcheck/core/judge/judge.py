@@ -112,10 +112,18 @@ async def _grade_field(
 
 
 def _required_names(scenario: Scenario) -> set[str]:
-    """Return the names of the fields the verdict depends on."""
+    """Return the names of the fields the verdict depends on.
+
+    Raises ``ValueError`` when ``pass_criteria.required`` names a field the scenario lacks,
+    since a typo there would let a run pass without checking that field.
+    """
     required = scenario.pass_criteria.required
     if required == "all":
         return {spec.name for spec in scenario.fields if spec.required}
+    known = {spec.name for spec in scenario.fields}
+    for name in required:
+        if name not in known:
+            raise ValueError(f"unknown required field: {name}")
     return set(required)
 
 
@@ -143,20 +151,27 @@ def _is_wrong(field: FieldVerdict, allow_near_miss: bool) -> bool:
 
 
 def _decide(
-    scenario: Scenario, fields: list[FieldVerdict], quality: QualityReport | None, stalled: bool
+    scenario: Scenario,
+    required_names: set[str],
+    fields: list[FieldVerdict],
+    quality: QualityReport | None,
+    stalled: bool,
 ) -> tuple[RunVerdict, list[str]]:
     """Apply the verdict algebra and return the verdict with its failure types in order.
 
     A run fails on determinate evidence (too many wrong required fields, a stall, or a quality
     dimension below the floor); otherwise it is undetermined if a required field or the quality
-    call is open, and passes only when nothing is open.
+    call is open, and passes only when nothing is open. Failure types name only what decided the
+    verdict, so wrong fields within ``max_wrong`` are tolerated and not listed.
     """
     criteria = scenario.pass_criteria
-    required = [f for f in fields if f.name in _required_names(scenario)]
+    required = [f for f in fields if f.name in required_names]
     wrong = [f for f in required if _is_wrong(f, criteria.allow_near_miss)]
-    failures = [
-        name for verdict, name in _FIELD_FAILURES if any(f.verdict == verdict for f in wrong)
-    ]
+    failures: list[str] = []
+    if len(wrong) > criteria.max_wrong:
+        failures = [
+            name for verdict, name in _FIELD_FAILURES if any(f.verdict == verdict for f in wrong)
+        ]
     low_quality = [
         failure
         for dimension, failure in _QUALITY_FAILURES.items()
@@ -165,7 +180,7 @@ def _decide(
     if stalled:
         failures.append("stalled")
     failures += low_quality
-    if len(wrong) > criteria.max_wrong or stalled or low_quality:
+    if failures:
         return "fail", failures
     still_open = quality is None or any(f.verdict == "undetermined" for f in required)
     return ("undetermined" if still_open else "pass"), failures
@@ -177,6 +192,7 @@ async def judge_run(run_dir: Path, scenario: Scenario, chat: ChatModel) -> Judge
     Reads ``events.jsonl``, ``plan.json`` and ``outcome.json``. Captured fields come from the
     last ``result`` event, or from the chat model reading the transcript when there is none.
     """
+    required_names = _required_names(scenario)
     events = read_events(run_dir)
     plan = VariationPlan.model_validate_json((run_dir / "plan.json").read_text(encoding="utf-8"))
     outcome = json.loads((run_dir / "outcome.json").read_text(encoding="utf-8"))
@@ -200,14 +216,14 @@ async def judge_run(run_dir: Path, scenario: Scenario, chat: ChatModel) -> Judge
             for spec in scenario.fields
         ]
     for field in fields:
-        if field.verdict == "undetermined" and field.name in _required_names(scenario):
+        if field.verdict == "undetermined" and field.name in required_names:
             reasons.append(f"field {field.name}: {field.note}")
 
     quality = await _ask(
         chat, quality_messages(scenario, transcript, plan, load_rubric()), QualityReport, reasons
     )
     stalled = outcome.get("reason") == "stalled"
-    verdict, failures = _decide(scenario, fields, quality, stalled)
+    verdict, failures = _decide(scenario, required_names, fields, quality, stalled)
     result = JudgeResult(
         verdict=verdict,
         failure_types=failures,

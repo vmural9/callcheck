@@ -199,13 +199,33 @@ async def _preflight(
     return result.passed
 
 
-async def _grade(run_dir: Path, scenario: Scenario, judge: str, settings: Settings) -> Path:
-    """Compute metrics, judge the run, render the report, print the verdict; return the report."""
-    write_metrics(run_dir)
-    result = await judge_run(run_dir, scenario, _build_chat(judge, settings))
-    report = write_run_report(run_dir)
-    _show_verdict(result, run_dir, report)
-    return report
+def _make_judge(name: str, settings: Settings) -> ChatModel:
+    """Build the judge model before anything is paid for; exit with the usage code if it fails."""
+    try:
+        return _build_chat(name, settings)
+    except Exception as exc:
+        raise _fail(f"Could not set up the {name} judge: {exc}") from exc
+
+
+async def _grade(run_dir: Path, scenario: Scenario, chat: ChatModel) -> bool:
+    """Compute metrics, judge the run, render the report and print the verdict.
+
+    A failure while judging (credentials, throttling, a bad reply) is reported in one line and
+    returns ``False``; the call's recording stays on disk and ``callcheck judge`` can redo it.
+    """
+    try:
+        write_metrics(run_dir)
+        result = await judge_run(run_dir, scenario, chat)
+        _show_verdict(result, run_dir, write_run_report(run_dir))
+    except Exception as exc:
+        console.print(
+            f"Judging failed for {escape(str(run_dir))}: {escape(str(exc))}. "
+            f"Re-run with: callcheck judge {escape(str(run_dir))}",
+            style="red",
+            soft_wrap=True,
+        )
+        return False
+    return True
 
 
 async def _one_call(
@@ -215,6 +235,7 @@ async def _one_call(
     persona: Persona,
     plan: VariationPlan,
     run_dir: Path,
+    chat: ChatModel,
 ) -> None:
     """Place one graded call: record it into ``run_dir``, then judge it and print the verdict."""
     names = [spec.name for spec in scenario.fields]
@@ -241,7 +262,7 @@ async def _one_call(
         settings=CallSettings(max_seconds=scenario.call.max_seconds, stall_s=scenario.call.stall_s),
     )
     await call.run()
-    await _grade(recorder.run_dir, scenario, choices.judge, settings)
+    await _grade(recorder.run_dir, scenario, chat)
 
 
 async def _run_batch(
@@ -251,6 +272,7 @@ async def _run_batch(
     persona: Persona,
     seeds: list[int],
     batch_dir: Path,
+    chat: ChatModel,
     preflight: bool,
 ) -> int:
     """Run the preflight (unless skipped), then one call per seed; return the exit code."""
@@ -264,8 +286,24 @@ async def _run_batch(
     for seed in seeds:
         plan = make_plan(scenario, persona, seed)
         run_dir = batch_dir / f"{persona.id}-{seed}"
-        await _one_call(settings, choices, scenario, persona, plan, run_dir)
+        await _one_call(settings, choices, scenario, persona, plan, run_dir, chat)
     return 0
+
+
+def _load_inputs(scenario_path: Path, persona_id: str) -> tuple[Scenario, Persona]:
+    """Load the scenario and persona, exiting with one line if a file or a field is wrong."""
+    persona_file = persona_path(scenario_path, persona_id)
+    for kind, path in (("Scenario", scenario_path), ("Persona", persona_file)):
+        if not path.is_file():
+            raise _fail(f"{kind} file not found: {path}")
+    scenario = load_scenario(scenario_path)
+    try:
+        load_reference_agent([spec.name for spec in scenario.fields])
+    except KeyError as exc:
+        raise _fail(
+            f"Scenario field {exc.args[0]!r} is not defined by the reference agent's intake.yaml"
+        ) from exc
+    return scenario, load_persona(persona_file)
 
 
 @app.command()
@@ -307,12 +345,14 @@ def run(
         nova_sonic="nova-sonic" in (choices.target, choices.caller),
         bedrock_judge=choices.judge == "bedrock",
     )
-    scenario = load_scenario(scenario_path)
-    persona_def = load_persona(persona_path(scenario_path, persona))
+    scenario, persona_def = _load_inputs(scenario_path, persona)
+    chat = _make_judge(choices.judge, settings)
     batch_dir = settings.runs_dir / f"{_stamp()}-{scenario.id}"
     seeds = [seed + i for i in range(n)]
     code = asyncio.run(
-        _run_batch(settings, choices, scenario, persona_def, seeds, batch_dir, not skip_preflight)
+        _run_batch(
+            settings, choices, scenario, persona_def, seeds, batch_dir, chat, not skip_preflight
+        )
     )
     raise typer.Exit(code)
 
@@ -353,7 +393,9 @@ def judge(
     scenario = _load_run(run_dir)
     name = _check_name(judge or settings.judge, CHAT, "--judge")
     _need_aws(settings, nova_sonic=False, bedrock_judge=name == "bedrock")
-    asyncio.run(_grade(run_dir, scenario, name, settings))
+    chat = _make_judge(name, settings)
+    if not asyncio.run(_grade(run_dir, scenario, chat)):
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -362,6 +404,8 @@ def report(
 ) -> None:
     """Render report.md again from a run's existing judge.json and metrics.json."""
     _load_run(run_dir)
+    if not (run_dir / "judge.json").exists():
+        raise _fail(f"No judge.json in {run_dir}; run callcheck judge {run_dir} first.")
     console.print(f"report:  {escape(str(write_run_report(run_dir)))}", soft_wrap=True)
 
 

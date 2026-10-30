@@ -180,3 +180,76 @@ def test_help_describes_every_command():
     out = invoke("--help").output
     for command in ("preflight", "run", "judge", "report", "adapters"):
         assert command in out
+
+
+class BrokenChat:
+    """A judge whose every request fails, as with expired credentials."""
+
+    async def complete(self, *args, **kwargs):
+        raise RuntimeError("ExpiredToken")
+
+
+def test_judge_that_cannot_be_built_fails_before_any_call(tmp_path, monkeypatch):
+    def refuse(name, settings):
+        raise RuntimeError("The config profile (x) could not be found")
+
+    monkeypatch.setattr(cli, "_build_chat", refuse)
+    res = invoke("run", SCENARIO, *FAKES)
+    assert res.exit_code == 2
+    assert "could not be found" in res.output
+    assert not (tmp_path / "runs").exists()
+
+
+def test_judging_failure_keeps_the_recording_and_goes_on(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "_build_chat", lambda name, settings: BrokenChat())
+    res = invoke("run", SCENARIO, *FAKES, "-n", "2", "--skip-preflight")
+    assert res.exit_code == 0, res.output
+    assert res.output.count("Judging failed for") == 2
+    assert "ExpiredToken" in res.output and "Re-run with: callcheck judge" in res.output
+    runs = sorted(p.parent for p in (tmp_path / "runs").rglob("events.jsonl"))
+    assert len(runs) == 2
+    assert all(not (run / "judge.json").exists() for run in runs)
+
+
+def test_judge_command_exits_1_when_judging_fails(tmp_path, monkeypatch):
+    invoke("run", SCENARIO, *FAKES, "--skip-preflight")
+    (run,) = run_dirs(tmp_path)
+    monkeypatch.setattr(cli, "_build_chat", lambda name, settings: BrokenChat())
+    res = invoke("judge", str(run), "--judge", "fake")
+    assert res.exit_code == 1 and "Judging failed for" in res.output
+
+
+def test_missing_scenario_file_is_one_line():
+    res = invoke("run", "scenarios/nowhere.yaml", *FAKES)
+    assert res.exit_code == 2
+    assert "Scenario file not found" in res.output and "Traceback" not in res.output
+
+
+def test_missing_persona_file_is_one_line():
+    res = invoke("run", SCENARIO, *FAKES, "--persona", "nobody")
+    assert res.exit_code == 2
+    assert "Persona file not found" in res.output and "Traceback" not in res.output
+
+
+def test_field_the_reference_agent_lacks_is_one_line(tmp_path):
+    scenario = tmp_path / "odd.yaml"
+    scenario.write_text(
+        "id: odd\ndescription: d\ncaller_goal: g\n"
+        "fields:\n  - {name: shoe_size, type: number, expected: 9}\n"
+    )
+    personas = tmp_path / "personas"
+    personas.mkdir()
+    (personas / "baseline.yaml").write_text("id: baseline\nstyle: plain\n")
+    res = invoke("run", str(scenario), *FAKES, "--skip-preflight")
+    assert res.exit_code == 2
+    assert "shoe_size" in res.output and "intake.yaml" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_report_without_judge_json_says_what_to_run(tmp_path):
+    invoke("run", SCENARIO, *FAKES, "--skip-preflight")
+    (run,) = run_dirs(tmp_path)
+    (run / "judge.json").unlink()
+    res = invoke("report", str(run))
+    assert res.exit_code == 2
+    assert "No judge.json in" in res.output and "callcheck judge" in res.output

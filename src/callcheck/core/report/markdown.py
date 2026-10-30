@@ -30,7 +30,7 @@ def _ms(value: float | None) -> str:
 def _verdict_section(judge: JudgeResult, outcome: dict) -> list[str]:
     """Render the verdict, failure types, summary and the reason the call ended."""
     failures = ", ".join(judge.failure_types) if judge.failure_types else "none"
-    return [
+    lines = [
         "## Verdict",
         "",
         f"- Verdict: **{judge.verdict}**",
@@ -38,6 +38,9 @@ def _verdict_section(judge: JudgeResult, outcome: dict) -> list[str]:
         f"- Summary: {_cell(judge.summary)}",
         f"- Call ended: {outcome.get('reason', 'unknown')}",
     ]
+    if outcome.get("error"):
+        lines.append(f"- Call error: {_cell(outcome['error'])}")
+    return lines
 
 
 def _fields_section(judge: JudgeResult) -> list[str]:

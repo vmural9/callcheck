@@ -9,6 +9,7 @@ options name, and prints the result.
 
 import asyncio
 import dataclasses
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -207,16 +208,30 @@ def _make_judge(name: str, settings: Settings) -> ChatModel:
         raise _fail(f"Could not set up the {name} judge: {exc}") from exc
 
 
+def _call_error(run_dir: Path) -> str | None:
+    """Return the error text of a call that ended with reason ``error``, else ``None``."""
+    outcome = json.loads((run_dir / "outcome.json").read_text(encoding="utf-8"))
+    if outcome.get("reason") != "error":
+        return None
+    return outcome.get("error") or "unknown error"
+
+
 async def _grade(run_dir: Path, scenario: Scenario, chat: ChatModel) -> bool:
     """Compute metrics, judge the run, render the report and print the verdict.
 
-    A failure while judging (credentials, throttling, a bad reply) is reported in one line and
-    returns ``False``; the call's recording stays on disk and ``callcheck judge`` can redo it.
+    Returns ``False`` when the run needs attention: judging failed (credentials, throttling, a
+    bad reply; reported in one line, the recording stays on disk and ``callcheck judge`` can
+    redo it) or the call itself ended in an error, which is printed with the verdict. An agent
+    that merely fails its scenario still returns ``True``.
     """
     try:
         write_metrics(run_dir)
         result = await judge_run(run_dir, scenario, chat)
         _show_verdict(result, run_dir, write_run_report(run_dir))
+        call_error = _call_error(run_dir)
+        if call_error:
+            console.print(f"call ended: error - {escape(call_error)}", style="red", soft_wrap=True)
+            return False
     except Exception as exc:
         console.print(
             f"Judging failed for {escape(str(run_dir))}: {escape(str(exc))}. "
@@ -236,8 +251,11 @@ async def _one_call(
     plan: VariationPlan,
     run_dir: Path,
     chat: ChatModel,
-) -> None:
-    """Place one graded call: record it into ``run_dir``, then judge it and print the verdict."""
+) -> bool:
+    """Place one graded call, record it into ``run_dir``, judge it and print the verdict.
+
+    Returns whether the call and its judging went cleanly (see ``_grade``).
+    """
     names = [spec.name for spec in scenario.fields]
     brief = _with_voice(build_brief(scenario, persona, plan), choices.voice)
     channel = FakeChannel()
@@ -262,7 +280,7 @@ async def _one_call(
         settings=CallSettings(max_seconds=scenario.call.max_seconds, stall_s=scenario.call.stall_s),
     )
     await call.run()
-    await _grade(recorder.run_dir, scenario, chat)
+    return await _grade(recorder.run_dir, scenario, chat)
 
 
 async def _run_batch(
@@ -275,7 +293,11 @@ async def _run_batch(
     chat: ChatModel,
     preflight: bool,
 ) -> int:
-    """Run the preflight (unless skipped), then one call per seed; return the exit code."""
+    """Run the preflight (unless skipped), then one call per seed; return the exit code.
+
+    The code is 1 when any call ended in an error or any judging failed, 2 when the preflight
+    failed, and 0 otherwise (an agent that fails its scenario is still a successful run).
+    """
     if preflight:
         brief = _with_voice(
             dataclasses.replace(preflight_brief(), voice=dict(persona.voice)), choices.voice
@@ -283,11 +305,12 @@ async def _run_batch(
         if not await _preflight(settings, choices, brief, batch_dir / "preflight"):
             console.print("Preflight failed; no calls were placed.", style="red")
             return EXIT_USAGE
+    clean = True
     for seed in seeds:
         plan = make_plan(scenario, persona, seed)
         run_dir = batch_dir / f"{persona.id}-{seed}"
-        await _one_call(settings, choices, scenario, persona, plan, run_dir, chat)
-    return 0
+        clean &= await _one_call(settings, choices, scenario, persona, plan, run_dir, chat)
+    return 0 if clean else 1
 
 
 def _load_inputs(scenario_path: Path, persona_id: str) -> tuple[Scenario, Persona]:

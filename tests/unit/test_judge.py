@@ -234,3 +234,19 @@ def test_make_chat_builds_fake_and_rejects_unknown():
     assert isinstance(make_chat("fake", responses=[]), FakeChat)
     with pytest.raises(KeyError, match="unknown chat"):
         make_chat("nope")
+
+
+async def test_call_error_is_undetermined_with_the_error_as_first_reason(tmp_path, scenario):
+    correction = Correction(field="phone", wrong_value="415 555 0143", final_value="415 555 0134")
+    run = _write_run(
+        tmp_path / "crashed",
+        fields=dict(GOOD_FIELDS, phone="415 555 0143"),
+        corrections=[correction],
+        outcome={"reason": "error", "error": "model access denied", "duration_ms": 900},
+    )
+    r = await judge_run(run, scenario, FakeChat([MATCH, GOOD_QUALITY]))
+    assert r.verdict == "undetermined" and r.failure_types == []
+    assert r.undetermined_reasons[0] == "call error: model access denied"
+    # The fields are still compared and reported, so the evidence is not lost.
+    assert next(f for f in r.fields if f.name == "phone").verdict == "mismatch"
+    assert json.loads((run / "judge.json").read_text())["verdict"] == "undetermined"

@@ -1,11 +1,13 @@
 """Unit tests for the command line, run on the offline fakes with a virtual clock."""
 
+import json
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 import callcheck.cli as cli
+from callcheck.adapters.targets.fake import FakeTarget
 from callcheck.cli import app
 from callcheck.core.clock import VirtualClock
 from callcheck.core.preflight import PreflightResult
@@ -203,12 +205,41 @@ def test_judge_that_cannot_be_built_fails_before_any_call(tmp_path, monkeypatch)
 def test_judging_failure_keeps_the_recording_and_goes_on(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_build_chat", lambda name, settings: BrokenChat())
     res = invoke("run", SCENARIO, *FAKES, "-n", "2", "--skip-preflight")
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 1, res.output  # every call is still placed, but the batch is not clean
     assert res.output.count("Judging failed for") == 2
     assert "ExpiredToken" in res.output and "Re-run with: callcheck judge" in res.output
     runs = sorted(p.parent for p in (tmp_path / "runs").rglob("events.jsonl"))
     assert len(runs) == 2
     assert all(not (run / "judge.json").exists() for run in runs)
+
+
+class CrashingTarget(FakeTarget):
+    """Fake target that fails as soon as the call sends it audio."""
+
+    async def send_audio(self, pcm: bytes) -> None:
+        raise RuntimeError("model access denied")
+
+
+def test_call_error_is_printed_judged_undetermined_and_exits_1(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "_build_target",
+        lambda name, agent, fields, channel, settings: CrashingTarget(channel, fields),
+    )
+    res = invoke("run", SCENARIO, *FAKES, "-n", "2", "--skip-preflight")
+    assert res.exit_code == 1, res.output
+    assert res.output.count("call ended: error - model access denied") == 2
+    runs = run_dirs(tmp_path)
+    assert len(runs) == 2
+    for run in runs:
+        assert json.loads((run / "judge.json").read_text())["verdict"] == "undetermined"
+        assert "- Call error: model access denied" in (run / "report.md").read_text()
+
+
+def test_an_agent_that_fails_its_scenario_still_exits_0(tmp_path):
+    res = invoke("run", SCENARIO, *FAKES, "--persona", "self_correcting", "--skip-preflight")
+    assert res.exit_code == 0, res.output
+    assert "call ended: error" not in res.output
 
 
 def test_judge_command_exits_1_when_judging_fails(tmp_path, monkeypatch):

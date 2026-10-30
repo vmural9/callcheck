@@ -90,3 +90,18 @@ def test_write_run_report_writes_report_md(run_dir_with_judge_and_metrics):
     path = write_run_report(run_dir_with_judge_and_metrics)
     assert path.name == "report.md"
     assert path.read_text(encoding="utf-8") == render_run_report(run_dir_with_judge_and_metrics)
+
+
+def test_report_shows_the_call_error(tmp_path):
+    _write(tmp_path, _judge(None), _METRICS)
+    (tmp_path / "outcome.json").write_text(
+        json.dumps({"reason": "error", "error": "stream closed | by peer", "duration_ms": 900}),
+        encoding="utf-8",
+    )
+    md = render_run_report(tmp_path)
+    assert "- Call ended: error" in md
+    assert "- Call error: stream closed \\| by peer" in md
+
+
+def test_report_has_no_call_error_line_for_a_clean_call(run_dir_with_judge_and_metrics):
+    assert "Call error" not in render_run_report(run_dir_with_judge_and_metrics)

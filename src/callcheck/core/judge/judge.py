@@ -191,6 +191,8 @@ async def judge_run(run_dir: Path, scenario: Scenario, chat: ChatModel) -> Judge
 
     Reads ``events.jsonl``, ``plan.json`` and ``outcome.json``. Captured fields come from the
     last ``result`` event, or from the chat model reading the transcript when there is none.
+    A call that ended with reason ``error`` is always ``undetermined`` (fields are still
+    compared and reported), with the error as the first undetermined reason.
     """
     required_names = _required_names(scenario)
     events = read_events(run_dir)
@@ -224,6 +226,10 @@ async def judge_run(run_dir: Path, scenario: Scenario, chat: ChatModel) -> Judge
     )
     stalled = outcome.get("reason") == "stalled"
     verdict, failures = _decide(scenario, required_names, fields, quality, stalled)
+    if outcome.get("reason") == "error":
+        # A crashed call says nothing about the agent: never a pass, never a blamed field.
+        verdict, failures = "undetermined", []
+        reasons.insert(0, f"call error: {outcome.get('error') or 'unknown'}")
     result = JudgeResult(
         verdict=verdict,
         failure_types=failures,

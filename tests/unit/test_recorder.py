@@ -1,5 +1,10 @@
 from callcheck.core.events import CallEvent
-from callcheck.core.recorder import Recorder, build_transcript, render_transcript_md
+from callcheck.core.recorder import (
+    Recorder,
+    build_transcript,
+    read_events,
+    render_transcript_md,
+)
 
 
 def test_recorder_writes_all_files_and_dedupes_dir(tmp_path):
@@ -75,3 +80,18 @@ def test_render_transcript_md_inlines_watchdog():
         [CallEvent(12000, "harness", "watchdog", {"reason": "stalled"})],
     )
     assert "[00:00.500] AGENT: Hi" in md and "[00:12.000] -- watchdog: stalled" in md
+
+
+def test_read_events_reverses_the_event_log(tmp_path):
+    recorder = Recorder(tmp_path / "run")
+    sent = [
+        CallEvent(0, "harness", "call_start", {}),
+        CallEvent(1500.5, "agent", "result", {"fields": {"phone": "415"}, "pcm": b"x"}),
+    ]
+    for ev in sent:
+        recorder.record(ev)
+    recorder.close({"reason": "caller_done"})
+    assert read_events(recorder.run_dir) == [
+        sent[0],
+        CallEvent(1500.5, "agent", "result", {"fields": {"phone": "415"}}),
+    ]

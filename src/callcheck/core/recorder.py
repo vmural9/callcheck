@@ -70,6 +70,13 @@ class Recorder:
         )
 
 
+def read_events(run_dir: Path) -> list[CallEvent]:
+    """Read ``events.jsonl`` in ``run_dir`` back into events, reversing ``event_to_json``."""
+    text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+    rows = (json.loads(line) for line in text.splitlines() if line.strip())
+    return [CallEvent(row["t_ms"], row["side"], row["kind"], row["payload"]) for row in rows]
+
+
 def _final_transcripts(events: list[CallEvent]) -> list[CallEvent]:
     """Return the final ``transcript`` events in time order."""
     found = [ev for ev in events if ev.kind == "transcript" and ev.payload.get("final", True)]

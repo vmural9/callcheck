@@ -57,12 +57,14 @@ Seven callers ship in `scenarios/personas/`:
 
 This is real output, not a mock-up: an excerpt of the `report.md` from a live batch of 8 calls
 (Nova Sonic calling Nova Sonic, the reference intake agent with all three planted bugs on, four
-personas, judged by Claude on Bedrock). Rows and sections are omitted, nothing is edited. The
-links point into that batch's run directory, which is not committed.
+personas, judged by Claude on Bedrock). Rows and sections are omitted and the values are unedited. The sample was rendered before
+the `timed_out` failure type existed: one run that ran out of time appears under `field_missing`
+in the original file and is omitted here. The links point into that batch's run directory, which is not committed.
 
 The sample shows two of the three planted bugs: a date of birth that never matches
-(`day_month_swap`) and corrections that never reach the form (`ignore_corrections`: the email
-row, where the agent's last save was right but the stored value was not). `strict_order` lives in
+(`day_month_swap`) and corrections that never reach the form (`ignore_corrections`: in 5 runs
+the agent's last email save was correct but the store kept the first, wrong one; the wrong email
+shown in the table below is a mishearing, not that case). `strict_order` lives in
 the form store, where a save for a field ahead of the first unsaved one is silently dropped. It
 is shown by a separate run of the `out_of_order` persona, not by this sample:
 

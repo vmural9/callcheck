@@ -1,0 +1,75 @@
+# The full twenty-field intake call, in the reference agent's question order.
+id: intake-new-patient
+description: New patient completes a full phone intake form.
+caller_goal: >
+  You are calling a clinic to register as a new patient. Answer the agent's questions
+  using your fact sheet. When the agent confirms the form is complete, say goodbye.
+fields:
+  - name: first_name
+    type: name
+    expected: Maria
+  - name: last_name
+    type: name
+    expected: Okonkwo-Reyes
+    spell_out: true       # the caller spells it when asked, or when it is read back wrong
+  - name: preferred_name
+    type: name
+    expected: Mari
+  - name: date_of_birth
+    type: date            # a day of 12 or less keeps day_month_swap visible
+    expected: 1988-03-07
+  - name: phone
+    type: phone
+    expected: "+1 415 555 0134"
+  - name: email
+    type: email
+    expected: maria.okonkwo@example.com
+    spell_out: true
+  - name: address_line
+    type: text
+    expected: 218 Valencia Street
+  - name: city
+    type: text
+    expected: San Francisco
+  - name: postal_code
+    type: alnum
+    expected: "94103"
+  - name: emergency_contact_name
+    type: name
+    expected: Daniel Reyes
+  - name: emergency_contact_phone
+    type: phone
+    expected: "+1 415 555 0172"
+  - name: insurance_provider
+    type: text
+    expected: Blue Shield of California
+  - name: insurance_member_id
+    type: alnum
+    expected: XQ7-4491-B
+    spell_out: true
+  - name: primary_care_physician
+    type: name
+    expected: Dr. Priya Nair
+  - name: preferred_pharmacy
+    type: text
+    expected: Walgreens on Market Street
+  - name: visit_type
+    type: enum
+    expected: new_patient
+    synonyms:
+      new_patient: [new patient, first visit]
+      follow_up: [follow up, returning patient]
+  - name: reason_for_visit
+    type: free_text       # open wording, so the judge model decides whether it was captured
+    expected: knee pain after running, started two weeks ago
+  - name: allergies
+    type: list
+    expected: [penicillin, latex]
+  - name: current_medications
+    type: list
+    expected: [ibuprofen, vitamin D]
+  - name: consent_to_text
+    type: boolean
+    expected: true
+call:
+  max_seconds: 480

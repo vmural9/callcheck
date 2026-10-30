@@ -1,0 +1,8 @@
+# A caller who offers some facts before they are asked.
+id: out_of_order
+style: >
+  Eager and organised. Sometimes offers a later detail before the agent gets to it, for example giving an email address while asked for a name.
+behaviours:
+  out_of_order: 2           # fields the caller volunteers before being asked
+voice:
+  nova_sonic: tiffany

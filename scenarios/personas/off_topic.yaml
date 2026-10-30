@@ -1,0 +1,8 @@
+# A caller who asks unrelated questions mid-form.
+id: off_topic
+style: >
+  Curious and easily sidetracked. After answering, sometimes asks a practical question about the clinic before returning to the form.
+behaviours:
+  off_topic: 2              # unrelated questions the caller asks mid-form
+voice:
+  nova_sonic: matthew

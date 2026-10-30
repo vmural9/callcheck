@@ -2,9 +2,11 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from callcheck.core.scenario import (
+    OFF_TOPIC_QUESTIONS,
     Behaviours,
     FieldSpec,
     Persona,
@@ -34,6 +36,7 @@ fields:
 """
 
 SHORT = Path("scenarios/intake_short.yaml")
+NEW_PATIENT = Path("scenarios/intake_new_patient.yaml")
 BASELINE = Path("scenarios/personas/baseline.yaml")
 SELF_CORRECTING = Path("scenarios/personas/self_correcting.yaml")
 
@@ -110,3 +113,53 @@ def test_every_correctable_type_yields_a_near_miss():
 
 def test_persona_path_sits_beside_the_scenario():
     assert persona_path(SHORT, "baseline") == BASELINE
+
+
+def _persona(**behaviours):
+    return Persona(id="p", style="s", behaviours=Behaviours(**behaviours))
+
+
+def test_plan_is_deterministic_with_all_behaviours():
+    s = load_scenario(NEW_PATIENT)
+    p = _persona(corrections=2, out_of_order=2, off_topic=1)
+    plan = make_plan(s, p, 7)
+    assert plan == make_plan(s, p, 7)
+    names = [f.name for f in s.fields]
+    assert len(plan.volunteer_early) == 2
+    assert all(names.index(n) >= 2 for n in plan.volunteer_early)
+    assert len(plan.off_topic) == 1
+    assert plan.off_topic[0].question in OFF_TOPIC_QUESTIONS
+    assert plan.off_topic[0].after_field in names[:-1]
+    assert len(OFF_TOPIC_QUESTIONS) >= 6
+
+
+def test_corrections_keep_their_seeded_draw_when_other_behaviours_are_added():
+    s = load_scenario(NEW_PATIENT)
+    plain = make_plan(s, _persona(corrections=2), 11)
+    busy = make_plan(s, _persona(corrections=2, out_of_order=2, off_topic=2), 11)
+    assert plain.corrections == busy.corrections
+
+
+def test_volunteer_and_corrections_do_not_overlap():
+    s = load_scenario(NEW_PATIENT)
+    p = _persona(corrections=3, out_of_order=5)
+    for seed in range(50):
+        plan = make_plan(s, p, seed)
+        corrected = {c.field for c in plan.corrections}
+        assert not corrected & set(plan.volunteer_early)
+
+
+def test_shipped_personas_load():
+    paths = sorted(Path("scenarios/personas").glob("*.yaml"))
+    assert len(paths) == 7
+    for path in paths:
+        assert load_persona(path).id == path.stem
+
+
+def test_intake_new_patient_matches_reference_agent():
+    s = load_scenario(NEW_PATIENT)
+    agent = yaml.safe_load(Path("src/callcheck/reference_agent/intake.yaml").read_text())
+    assert [f.name for f in s.fields] == list(agent["fields"])
+    assert len(s.fields) == 20
+    (dob,) = [f for f in s.fields if f.name == "date_of_birth"]
+    assert dob.expected.day <= 12

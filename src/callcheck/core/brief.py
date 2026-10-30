@@ -15,6 +15,11 @@ _SPELL_OUT_NOTE = (
     " read-back)"
 )
 
+_NO_UNSCRIPTED_CORRECTIONS = (
+    "Do not correct any other value unless the agent reads it back wrong; then spell it or"
+    " repeat it once and accept the next read-back."
+)
+
 _PREFLIGHT_PROMPT = (
     "Wait for the other person to speak. Then say exactly: "
     "'Hello, can you hear me? Testing one two three.' "
@@ -27,7 +32,9 @@ def _behaviour_sentences(persona: Persona) -> list[str]:
     b = persona.behaviours
     sentences = []
     if b.corrections > 0:
-        sentences.append("You sometimes give a value, then correct yourself in the same breath.")
+        sentences.append(
+            "You sometimes give a value, then correct yourself after the agent reads it back."
+        )
     if b.out_of_order > 0:
         sentences.append("You sometimes volunteer information before you are asked for it.")
     if b.off_topic > 0:
@@ -60,9 +67,17 @@ def build_brief(scenario: Scenario, persona: Persona, plan: VariationPlan) -> Ca
         for spec in scenario.fields
     ]
     corrections = [
-        f"When asked for your {c.field}, first say '{c.wrong_value}', "
-        f"then in the same breath correct yourself to '{c.final_value}'."
+        f"When asked for your {c.field}, say '{c.wrong_value}'. Then, after the agent reads "
+        f"it back, say that was wrong and give '{c.final_value}'."
         for c in plan.corrections
+    ] or ["None."]
+    values = {spec.name: spoken_value(spec) for spec in scenario.fields}
+    early = [
+        f"Before the agent asks for your {name}, bring it up yourself: {values[name]}."
+        for name in plan.volunteer_early
+    ] or ["None."]
+    off_topic = [
+        f"After you answer your {q.after_field}, ask: '{q.question}'" for q in plan.off_topic
     ] or ["None."]
     timeout = _seconds(scenario.call.greeting_timeout_s)
     sections = [
@@ -70,7 +85,10 @@ def build_brief(scenario: Scenario, persona: Persona, plan: VariationPlan) -> Ca
             "Who you are",
             [scenario.caller_goal.strip(), "You are the caller, never the agent."],
         ),
-        _section("How you speak", [persona.style.strip(), *_behaviour_sentences(persona)]),
+        _section(
+            "How you speak",
+            [persona.style.strip(), *_behaviour_sentences(persona), _NO_UNSCRIPTED_CORRECTIONS],
+        ),
         _section("Your facts", facts),
         _section(
             "What to do first",
@@ -80,6 +98,8 @@ def build_brief(scenario: Scenario, persona: Persona, plan: VariationPlan) -> Ca
             ],
         ),
         _section("Corrections to make", corrections),
+        _section("Things to mention early", early),
+        _section("Questions to ask", off_topic),
         _section(
             "Ending the call",
             [

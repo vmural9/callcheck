@@ -31,6 +31,17 @@ FieldType = Literal[
 
 _CORRECTABLE: tuple[FieldType, ...] = ("phone", "date", "alnum", "email", "number")
 _NANP_LENGTH = 11
+_FIRST_VOLUNTEERABLE = 2  # fields 0 and 1 come first anyway, so volunteering them is no test
+
+OFF_TOPIC_QUESTIONS: tuple[str, ...] = (
+    "Is there parking at the clinic?",
+    "Do you take walk-ins on Saturdays?",
+    "What are your opening hours on weekdays?",
+    "Is the clinic close to a bus stop?",
+    "Can I bring my sister with me to the visit?",
+    "Do I need to bring a printed copy of my insurance card?",
+    "How long does a first appointment usually take?",
+)
 
 
 class FieldSpec(BaseModel):
@@ -60,6 +71,10 @@ class CallConfig(BaseModel):
     max_seconds: float = 360
     stall_s: float = 6
     greeting_timeout_s: float = 8
+    nudge_after_s: float = 8
+    max_nudges: int = 2
+    slow_response_s: float = 4
+    double_talk_s: float = 1.5
 
 
 class Scenario(BaseModel):
@@ -111,12 +126,21 @@ class Correction(BaseModel):
     final_value: str
 
 
+class OffTopic(BaseModel):
+    """An unrelated question the caller asks right after answering a field."""
+
+    after_field: str
+    question: str
+
+
 class VariationPlan(BaseModel):
     """What varies in one run, fixed by the seed."""
 
     seed: int
     persona_id: str
     corrections: list[Correction] = []
+    volunteer_early: list[str] = []
+    off_topic: list[OffTopic] = []
 
 
 def _as_date(value: Any) -> date:
@@ -204,17 +228,38 @@ def _wrong_value(spec: FieldSpec) -> str:
 
 
 def make_plan(scenario: Scenario, persona: Persona, seed: int) -> VariationPlan:
-    """Choose, from ``seed``, which fields the caller states wrong before correcting."""
+    """Choose, from ``seed``, what varies: corrections, early volunteers and off-topic questions.
+
+    One ``random.Random(seed)`` makes the draws in that order, so corrections keep the values
+    they had before the other behaviours existed.
+    """
     rng = random.Random(seed)
+    b = persona.behaviours
     candidates = [spec for spec in scenario.fields if spec.type in _CORRECTABLE]
-    count = min(persona.behaviours.corrections, len(candidates))
+    count = min(b.corrections, len(candidates))
     chosen = set(rng.sample(range(len(candidates)), count))
     corrections = [
         Correction(field=spec.name, wrong_value=_wrong_value(spec), final_value=spoken_value(spec))
         for index, spec in enumerate(candidates)
         if index in chosen
     ]
-    return VariationPlan(seed=seed, persona_id=persona.id, corrections=corrections)
+    corrected = {c.field for c in corrections}
+    names = [spec.name for spec in scenario.fields]
+    volunteerable = [n for n in names[_FIRST_VOLUNTEERABLE:] if n not in corrected]
+    volunteered = set(rng.sample(volunteerable, min(b.out_of_order, len(volunteerable))))
+    volunteer_early = [n for n in names if n in volunteered]
+    after_fields = rng.sample(names[:-1], min(b.off_topic, len(names) - 1))
+    questions = rng.sample(OFF_TOPIC_QUESTIONS, len(after_fields))
+    off_topic = [
+        OffTopic(after_field=f, question=q) for f, q in zip(after_fields, questions, strict=True)
+    ]
+    return VariationPlan(
+        seed=seed,
+        persona_id=persona.id,
+        corrections=corrections,
+        volunteer_early=volunteer_early,
+        off_topic=off_topic,
+    )
 
 
 def load_scenario(path: Path) -> Scenario:

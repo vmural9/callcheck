@@ -52,8 +52,17 @@ def test_notes_say_what_differed():
     assert "4155550134 vs 4155550143" in verdict.note
 
 
-def test_short_phone_is_undetermined():
-    assert V(P("phone", "+1 415 555 0134"), "555 0134") == "undetermined"
+def test_phone_with_seven_to_nine_digits_is_a_mismatch():
+    spec = P("phone", "+1 415 555 0134")
+    for captured in ("555 0134", "415 555 013", "(415) 555-013"):
+        out = compare_field(spec, captured, "result")
+        assert out.verdict == "mismatch" and out.note.startswith("too few digits:")
+
+
+def test_phone_with_fewer_than_seven_digits_or_none_is_undetermined():
+    spec = P("phone", "+1 415 555 0134")
+    assert V(spec, "555 013") == "undetermined"
+    assert V(spec, "four one five") == "undetermined"
 
 
 def test_number_alnum_list_string_and_empty():
@@ -136,6 +145,12 @@ def test_dr_smith_not_drive_smith():
 def test_enum_negation_is_undetermined():
     assert V(_visit_type(), "not a new patient") == "undetermined"
     assert V(_visit_type(), "this isn't a new patient") == "undetermined"
+
+
+def test_enum_negation_contractions_with_and_without_apostrophe():
+    for lead in ("wasn't", "wasnt", "isn't", "isnt", "don't", "dont", "doesn't", "doesnt", "never"):
+        assert V(_visit_type(), f"{lead} a new patient visit") == "undetermined", lead
+    assert V(_visit_type(), "no new patient visit") == "undetermined"
 
 
 def test_enum_only_other_option_phrase_is_mismatch():

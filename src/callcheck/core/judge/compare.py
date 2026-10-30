@@ -20,6 +20,7 @@ _MATCH_RATIO = 0.95
 _NEAR_MISS_RATIO = 0.75
 _BAND_WIDTH = 0.20
 _PHONE_TAIL = 10
+_PHONE_MIN_CAPTURED = 7
 _NUMBER_TOLERANCE = 1e-9
 _DEFAULT_A = datetime(2000, 1, 1)
 _DEFAULT_B = datetime(2001, 2, 2)
@@ -41,7 +42,11 @@ _DIGIT_WORDS = {
     "eight": "8",
     "nine": "9",
 }
-_NEGATIONS = frozenset({"not", "no", "never", "isn"})
+# Contractions appear both split at the apostrophe ("wasn t") and with it dropped ("wasnt").
+_NEGATIONS = frozenset(
+    {"not", "no", "never"}
+    | {f"{stem}{tail}" for stem in ("isn", "wasn", "don", "doesn") for tail in ("", "t")}
+)
 _NEGATION_WINDOW = 3
 _DIGIT_RUN = re.compile(rf"\b(?:{'|'.join(_DIGIT_WORDS)})(?: (?:{'|'.join(_DIGIT_WORDS)}))+\b")
 
@@ -130,10 +135,16 @@ def _compare_similar(spec: FieldSpec, captured: Any) -> Outcome:
 
 
 def _compare_phone(spec: FieldSpec, captured: Any) -> Outcome:
-    """Compare phone numbers by last ten digits, or in full when both have 11 or more."""
+    """Compare phone numbers by last ten digits, or in full when both have 11 or more.
+
+    A captured number of seven to nine digits is a mismatch (a digit was dropped); one with
+    fewer, or none, is undetermined, as is an expected number that is itself too short.
+    """
     want, got = normalize_phone(str(spec.expected)), normalize_phone(str(captured))
-    if min(len(want), len(got)) < _PHONE_TAIL:
+    if len(want) < _PHONE_TAIL or len(got) < _PHONE_MIN_CAPTURED:
         return "undetermined", f"fewer than {_PHONE_TAIL} digits: {want} vs {got}"
+    if len(got) < _PHONE_TAIL:
+        return "mismatch", f"too few digits: {want} vs {got}"
     if len(want) > _PHONE_TAIL and len(got) > _PHONE_TAIL:
         return _equal(want == got, f"full digits {want} vs {got}")
     return _equal(

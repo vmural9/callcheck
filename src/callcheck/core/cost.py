@@ -49,7 +49,8 @@ def nova_usage(events: list[CallEvent], side: str) -> dict[str, int] | None:
     last: dict[str, dict] = {}
     for ev in sorted(events, key=lambda e: e.t_ms):
         if ev.side == side and ev.kind == "usage":
-            last[str(ev.payload.get("sessionId"))] = ev.payload.get("details", {}).get("total", {})
+            details = ev.payload.get("details") or {}
+            last[str(ev.payload.get("sessionId"))] = details.get("total") or {}
     if not last:
         return None
     sums = dict.fromkeys(_UNITS, 0)

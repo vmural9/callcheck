@@ -49,6 +49,23 @@ def test_nova_usage_takes_last_total_per_session():
     assert nova_usage([], "agent") is None
 
 
+def test_nova_usage_treats_null_details_as_empty():
+    events = [
+        CallEvent(1, "agent", "usage", {"sessionId": "s", "details": None}),
+        CallEvent(2, "agent", "usage", {"sessionId": "t", "details": {"total": None}}),
+        _usage(3, "u", 100, 10, 50, 5),
+    ]
+    assert nova_usage(events, "agent") == {
+        "speech_in": 100,
+        "speech_out": 50,
+        "text_in": 10,
+        "text_out": 5,
+    }
+    assert nova_usage(events[:1], "agent") == dict.fromkeys(
+        ("speech_in", "speech_out", "text_in", "text_out"), 0
+    )
+
+
 def test_cost_of_known_and_unknown_models():
     events = [_usage(1, "s", 2000, 0, 1000, 0)]
     judge = [{"model": "nope", "input_tokens": 1000, "output_tokens": 1000}]

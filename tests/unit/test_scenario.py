@@ -96,8 +96,10 @@ def test_every_correctable_type_yields_a_near_miss():
         (FieldSpec(name="a", type="alnum", expected="XQ7-4491-B"), "XQ7-4491-C"),
         (FieldSpec(name="a", type="alnum", expected="AB9"), "AB0"),
         (FieldSpec(name="a", type="alnum", expected="AZ"), "AA"),
-        (FieldSpec(name="e", type="email", expected="maria.okonkwo@example.com"),
-         "maria.okonkwp@example.com"),
+        (
+            FieldSpec(name="e", type="email", expected="maria.okonkwo@example.com"),
+            "maria.okonkwp@example.com",
+        ),
         (FieldSpec(name="n", type="number", expected=41), "42"),
     ]:
         scenario = Scenario(id="x", description="x", caller_goal="x", fields=[spec])

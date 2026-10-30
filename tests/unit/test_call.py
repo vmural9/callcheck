@@ -122,9 +122,7 @@ def audio_frames(side: str, ms: int) -> list[CallEvent]:
     ]
 
 
-def fake_call(
-    settings: CallSettings, behaviours: set[str] = frozenset()
-) -> tuple[Call, ListSink]:
+def fake_call(settings: CallSettings, behaviours: set[str] = frozenset()) -> tuple[Call, ListSink]:
     """Build a call between the fake caller and fake target with a fresh sink."""
     channel = FakeChannel()
     sink = ListSink()
@@ -170,9 +168,7 @@ async def test_speech_end_is_stamped_at_the_first_silent_frame_not_the_vad_decis
 
 
 async def test_stalled_target_ends_with_watchdog_at_twice_stall():
-    call, sink = fake_call(
-        CallSettings(stall_s=2, max_seconds=60), {"stall_after:first_name"}
-    )
+    call, sink = fake_call(CallSettings(stall_s=2, max_seconds=60), {"stall_after:first_name"})
     outcome = await call.run()
     assert outcome.reason == "stalled"
     assert 4000 <= outcome.duration_ms <= 4000 + 3 * 20 + 2500
@@ -196,9 +192,7 @@ async def test_interrupted_event_flushes_speakers_buffer():
 
 
 async def test_max_duration_ends_call():
-    call, sink = fake_call(
-        CallSettings(stall_s=100, max_seconds=3), {"stall_after:first_name"}
-    )
+    call, sink = fake_call(CallSettings(stall_s=100, max_seconds=3), {"stall_after:first_name"})
     outcome = await call.run()
     assert outcome.reason == "max_duration"
     assert 3000 <= outcome.duration_ms <= 3000 + 2 * 20
@@ -254,8 +248,11 @@ async def test_unrecoverable_error_event_ends_the_call_with_its_message():
         settings=CallSettings(max_seconds=60),
     ).run()
     assert outcome.reason == "error" and outcome.error == "socket died"
-    assert sink.closed_with == {"reason": "error", "duration_ms": outcome.duration_ms,
-                                "error": "socket died"}
+    assert sink.closed_with == {
+        "reason": "error",
+        "duration_ms": outcome.duration_ms,
+        "error": "socket died",
+    }
 
 
 async def test_playout_overflow_is_recorded_as_a_recoverable_error():
@@ -293,7 +290,10 @@ async def test_a_failing_close_does_not_stop_the_other_close_or_the_sink():
     target = ScriptedEndpoint([endpoint_event("agent", "closed")])
     sink = ListSink()
     outcome = await Call(
-        caller=caller, target=target, sink=sink, clock=VirtualClock(),
+        caller=caller,
+        target=target,
+        sink=sink,
+        clock=VirtualClock(),
         settings=CallSettings(max_seconds=60),
     ).run()
     assert outcome.reason == "target_closed"

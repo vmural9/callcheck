@@ -66,7 +66,8 @@ async def test_fake_target_stalls_after_field():
     events = await pump(target, caller, max_frames=600)
     assert target.result() == {"first_name": "Maria"}
     agent_lines = [
-        e.payload["text"] for e in events
+        e.payload["text"]
+        for e in events
         if e.side == "agent" and e.kind == "transcript" and e.payload["role"] == "agent"
     ]
     assert agent_lines and not any("phone" in line for line in agent_lines)

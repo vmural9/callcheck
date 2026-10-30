@@ -47,3 +47,4 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = ["live: places real provider calls; needs credentials and CALLCHECK_LIVE=1"]
+filterwarnings = ["error"]

@@ -52,9 +52,7 @@ class CallEvent:
 def event_to_json(ev: CallEvent) -> str:
     """Serialise an event to a single JSON line, leaving out the raw ``pcm`` audio."""
     payload = {k: v for k, v in ev.payload.items() if k != "pcm"}
-    return json.dumps(
-        {"t_ms": ev.t_ms, "side": ev.side, "kind": ev.kind, "payload": payload}
-    )
+    return json.dumps({"t_ms": ev.t_ms, "side": ev.side, "kind": ev.kind, "payload": payload})
 
 
 def endpoint_event(side: Side, kind: str, **payload: object) -> CallEvent:

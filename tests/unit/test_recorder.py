@@ -11,6 +11,7 @@ def test_recorder_writes_all_files_and_dedupes_dir(tmp_path):
     r1 = Recorder(tmp_path / "run")
     r2 = Recorder(tmp_path / "run")
     assert r2.run_dir.name == "run-2"
+    r2.close({"reason": "caller_done", "duration_ms": 0})
     r1.record(CallEvent(0, "harness", "call_start", {}))
     r1.write_audio(b"\x00" * 960, b"\x00" * 960)
     r1.close({"reason": "caller_done", "duration_ms": 20})

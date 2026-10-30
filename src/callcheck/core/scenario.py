@@ -16,7 +16,16 @@ import yaml
 from pydantic import BaseModel, model_validator
 
 FieldType = Literal[
-    "name", "text", "date", "phone", "email", "alnum", "number", "boolean", "enum", "list",
+    "name",
+    "text",
+    "date",
+    "phone",
+    "email",
+    "alnum",
+    "number",
+    "boolean",
+    "enum",
+    "list",
     "free_text",
 ]
 
@@ -201,9 +210,7 @@ def make_plan(scenario: Scenario, persona: Persona, seed: int) -> VariationPlan:
     count = min(persona.behaviours.corrections, len(candidates))
     chosen = set(rng.sample(range(len(candidates)), count))
     corrections = [
-        Correction(
-            field=spec.name, wrong_value=_wrong_value(spec), final_value=spoken_value(spec)
-        )
+        Correction(field=spec.name, wrong_value=_wrong_value(spec), final_value=spoken_value(spec))
         for index, spec in enumerate(candidates)
         if index in chosen
     ]

@@ -18,7 +18,7 @@ class FakeChat(ChatModel):
         messages: list[Message],
         *,
         json_schema: dict | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
     ) -> ChatResult:
         """Record ``messages`` and return the next scripted reply; fail when none is left."""
         self.calls.append(messages)

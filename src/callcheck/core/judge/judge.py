@@ -62,7 +62,7 @@ async def _ask[M: BaseModel](
     error = ""
     for _ in range(_ATTEMPTS):
         reply = await chat.complete(
-            messages, json_schema=model.model_json_schema(), temperature=0.0
+            messages, json_schema=model.model_json_schema(), temperature=None
         )
         if reply.json is None:
             error = "reply was not JSON"

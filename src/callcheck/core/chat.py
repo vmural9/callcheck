@@ -34,7 +34,10 @@ class ChatModel(Protocol):
         messages: list[Message],
         *,
         json_schema: dict | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
     ) -> ChatResult:
-        """Return the model's reply to ``messages``, parsed against ``json_schema`` if given."""
+        """Return the model's reply to ``messages``, parsed against ``json_schema`` if given.
+
+        ``temperature=None`` means the provider's default; adapters omit the parameter.
+        """
         ...

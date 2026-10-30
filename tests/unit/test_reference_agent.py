@@ -134,3 +134,10 @@ def test_prompt_tells_the_agent_to_read_back_the_callers_words():
     prompt = load_reference_agent(["phone"], frozenset()).system_prompt
     assert "exactly as the caller said it" in prompt
     assert "Never read back anything the tool returned" in prompt
+
+
+def test_strict_order_tells_the_agent_to_treat_volunteered_fields_as_covered():
+    buggy = load_reference_agent(["first_name"], frozenset({"strict_order"})).system_prompt
+    clean = load_reference_agent(["first_name"], frozenset()).system_prompt
+    assert "never ask for it again" in buggy
+    assert "never ask for it again" not in clean

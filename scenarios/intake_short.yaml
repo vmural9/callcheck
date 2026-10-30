@@ -1,0 +1,29 @@
+# A six-field intake call: short enough for a first run that costs cents and ends in two minutes.
+id: intake-short
+description: New patient completes a short phone intake form.
+caller_goal: >
+  You are calling a clinic to register as a new patient. Answer the agent's questions
+  using your fact sheet. When the agent confirms the form is complete, say goodbye.
+fields:
+  - name: first_name
+    type: name            # a person's name, compared by sound as well as spelling
+    expected: Maria
+  - name: last_name
+    type: name
+    expected: Okonkwo-Reyes
+    spell_out: true       # the caller spells it when asked, or when it is read back wrong
+  - name: date_of_birth
+    type: date            # a YAML date or string; a day of 12 or less keeps day_month_swap visible
+    expected: 1988-03-07
+  - name: phone
+    type: phone           # compared as digits, whatever the formatting
+    expected: "+1 415 555 0134"
+  - name: email
+    type: email           # compared as an address, letter by letter
+    expected: maria.okonkwo@example.com
+    spell_out: true
+  - name: reason_for_visit
+    type: free_text       # open wording, so the judge model decides whether it was captured
+    expected: knee pain after running, started two weeks ago
+call:
+  max_seconds: 240

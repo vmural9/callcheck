@@ -1,0 +1,4 @@
+# The control caller: cooperative and clear, with every behaviour left at its default.
+id: baseline
+style: >
+  Cooperative and clear. Answers exactly what is asked in one or two sentences.

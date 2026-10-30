@@ -1,0 +1,16 @@
+# A caller who states some facts wrong first, then corrects them.
+id: self_correcting
+style: >
+  Friendly, a little distracted. Speaks in complete sentences. Sometimes gives a value,
+  pauses, and corrects it: "it's 0143, no wait, 0134".
+behaviours:
+  corrections: 2            # fields the caller will state wrong first, then correct
+  out_of_order: 0           # fields the caller volunteers before being asked
+  off_topic: 1              # unrelated questions the caller asks mid-form
+  interrupts: false         # whether the caller talks over the agent
+  verbosity: medium         # terse | medium | rambling
+  clarity: clear            # clear | mumbled (mumbled adds hedges, restarts, "um")
+voice:
+  nova_sonic: tiffany       # per-provider voice ids, all optional
+  openai_realtime: coral
+  elevenlabs: <voice id>

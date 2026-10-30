@@ -19,8 +19,7 @@ async def test_ignore_corrections_keeps_first_value():
     s = FormStore(["phone"], {"phone": "phone"}, frozenset({"ignore_corrections"}))
     first = await s.execute("save_field", {"name": "phone", "value": "415 555 0143"})
     second = await s.execute("save_field", {"name": "phone", "value": "415 555 0134"})
-    assert first == {"ok": True, "saved": {"phone": "415 555 0143"}}
-    assert second == {"ok": True, "saved": {"phone": "415 555 0134"}}
+    assert first == second == {"ok": True}
     assert s.snapshot()["fields"]["phone"] == "415 555 0143"
 
 
@@ -51,10 +50,10 @@ async def test_non_date_kinds_are_stored_verbatim_even_with_the_swap_bug():
     assert s.snapshot()["fields"]["phone"] == "415 555 0143"
 
 
-async def test_save_field_returns_what_was_stored():
-    s = FormStore(["dob"], {"dob": "date"}, frozenset())
+async def test_save_field_does_not_echo_the_stored_value():
+    s = FormStore(["dob"], {"dob": "date"}, frozenset({"day_month_swap"}))
     result = await s.execute("save_field", {"name": "dob", "value": "March 7 1988"})
-    assert result == {"ok": True, "saved": {"dob": "1988-03-07"}}
+    assert result == {"ok": True}
 
 
 async def test_unknown_field_is_rejected_and_not_stored():
@@ -119,3 +118,19 @@ def test_intake_yaml_has_twenty_fields_with_valid_kinds():
     assert {"first_name", "date_of_birth", "phone", "consent_to_text", "visit_type"} <= set(fields)
     assert fields["date_of_birth"]["kind"] == "date" and fields["phone"]["kind"] == "phone"
     assert all(f["kind"] in get_args(FieldType) and f["question"] for f in fields.values())
+
+
+def test_strict_order_replaces_the_early_field_sentence():
+    spec = yaml.safe_load(INTAKE_YAML.read_text())
+    clean = load_reference_agent(["first_name", "phone"], frozenset()).system_prompt
+    buggy = load_reference_agent(["first_name", "phone"], frozenset({"strict_order"})).system_prompt
+    assert spec["early_field_sentence"] in clean
+    assert spec["strict_order_sentence"] not in clean
+    assert spec["strict_order_sentence"] in buggy
+    assert spec["early_field_sentence"] not in buggy
+
+
+def test_prompt_tells_the_agent_to_read_back_the_callers_words():
+    prompt = load_reference_agent(["phone"], frozenset()).system_prompt
+    assert "exactly as the caller said it" in prompt
+    assert "Never read back anything the tool returned" in prompt

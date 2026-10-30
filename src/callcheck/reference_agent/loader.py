@@ -24,7 +24,7 @@ def _spec() -> dict:
 
 
 def _tidy(prompt: str) -> str:
-    """Collapse the blank lines left by an empty placeholder into a single paragraph break."""
+    """Collapse runs of blank lines into a single paragraph break and end with one newline."""
     return re.sub(r"\n{3,}", "\n\n", prompt).strip() + "\n"
 
 
@@ -40,7 +40,7 @@ def load_reference_agent(
         if name not in spec["fields"]:
             raise KeyError(name)
     fields_block = "\n".join(f"- {n}: {spec['fields'][n]['question']}" for n in field_names)
-    strict_order_block = spec["strict_order_sentence"] if "strict_order" in bugs else ""
+    order_key = "strict_order_sentence" if "strict_order" in bugs else "early_field_sentence"
     store = FormStore(field_names, {n: spec["fields"][n]["kind"] for n in field_names}, bugs)
     tools = [
         ToolSpec(
@@ -64,7 +64,7 @@ def load_reference_agent(
     return AgentDefinition(
         system_prompt=_tidy(
             spec["system_prompt_template"].format(
-                fields_block=fields_block, strict_order_block=strict_order_block
+                fields_block=fields_block, strict_order_block=spec[order_key]
             )
         ),
         tools=tools,

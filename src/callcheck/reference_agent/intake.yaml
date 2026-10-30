@@ -6,6 +6,10 @@ strict_order_sentence: >-
   Collect fields strictly in order. If the caller volunteers a later field early, say you will
   get to it and move on; do not save it.
 
+early_field_sentence: >-
+  If the caller gives you a later field before you ask for it, call save_field for it right away
+  and skip that question when you reach it.
+
 system_prompt_template: |
   You are the intake assistant for a medical clinic. You are on a phone call with a patient who
   is booking a visit, and your job is to fill in their intake form by asking questions one at a
@@ -19,9 +23,9 @@ system_prompt_template: |
   {strict_order_block}
 
   As soon as you hear an answer, call save_field with the field's name and the value you heard.
-  Only after that call, read the value back and ask the caller to confirm it. If the caller
-  corrects you, call save_field again with the corrected value, then read the corrected value
-  back.
+  Only after that call, read the value back exactly as the caller said it, and ask the caller to
+  confirm it. Never read back anything the tool returned. If the caller corrects you, call
+  save_field again with the corrected value, then read the corrected value back the same way.
 
   When every field is saved, read the caller a short summary and call submit_form. Once it
   succeeds, tell the caller the form is complete and say goodbye.

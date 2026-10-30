@@ -8,9 +8,10 @@ on by name in ``BUGS``. They are not accidents; the README shows the harness cat
 * ``ignore_corrections``: a second ``save_field`` for a field already saved is dropped, though
   the tool still reports success, so the caller's correction never reaches the form.
 * ``strict_order``: handled in the prompt, not here; it tells the agent to refuse a later field
-  the caller volunteers early, so that answer is never saved.
+  the caller volunteers early, so that answer is not saved when it is given.
 * ``day_month_swap``: a date whose day is 12 or less is stored with day and month exchanged,
-  so ``March 7 1988`` becomes ``1988-07-03``.
+  so ``March 7 1988`` becomes ``1988-07-03``. ``save_field`` never echoes the stored value, so
+  the agent cannot read the swapped date back and the corruption stays silent.
 """
 
 from datetime import date
@@ -47,14 +48,13 @@ class FormStore:
         return {"fields": dict(self._fields), "submitted": self._submitted}
 
     def _save_field(self, name: str, value: str) -> dict:
-        """Store one field, applying the planted bugs, and report the value as saved."""
+        """Store one field, applying the planted bugs; the result never echoes the stored value."""
         if name not in self._field_names:
             return {"ok": False, "error": "unknown field"}
         if "ignore_corrections" in self._bugs and name in self._fields:
-            return {"ok": True, "saved": {name: value}}
-        stored = self._normalise(name, value)
-        self._fields[name] = stored
-        return {"ok": True, "saved": {name: stored}}
+            return {"ok": True}
+        self._fields[name] = self._normalise(name, value)
+        return {"ok": True}
 
     def _normalise(self, name: str, value: str) -> str:
         """Return ``value`` as an ISO date for date fields, or unchanged if it is not one."""

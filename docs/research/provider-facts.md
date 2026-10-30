@@ -27,3 +27,11 @@
 
 ## C. Synthetic input, echo, turn detection
 - Neither vendor's fetched docs cover TTS or synthetic input accuracy, or echo and turn detection with machine speech: not found.
+
+## D. Verified by CLI in the target account (2026-10-30, us-west-2)
+- Foundation models listed ACTIVE: `amazon.nova-2-sonic-v1:0`, `amazon.nova-2-5-sonic`,
+  `anthropic.claude-sonnet-5-5`, `anthropic.claude-haiku-5-5`, `anthropic.claude-opus-5-5`.
+- Inference profiles present: `us.anthropic.claude-sonnet-5-5`, `us.anthropic.claude-haiku-5-5`,
+  `us.anthropic.claude-opus-5-5`, and `global.` variants of each.
+- Not yet verified: that `InvokeModelWithBidirectionalStream` accepts the 2.x Nova ids (the API
+  reference lists only v1). The M1 spike settles it.

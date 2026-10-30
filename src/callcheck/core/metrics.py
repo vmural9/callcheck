@@ -36,14 +36,15 @@ def _greeting_latency(events: list[CallEvent]) -> float | None:
     return min(starts) if starts else None
 
 
-def _time_to_first_audio(events: list[CallEvent]) -> list[float]:
+def ttfa_gaps(events: list[CallEvent]) -> list[tuple[float, float]]:
     """Measure, for each caller turn, the gap from its end to the agent's next audio.
 
-    A turn is skipped when the caller started speaking again before the agent
-    answered, since that gap measures the caller's pause rather than the agent.
+    Returns ``(speech_end_t_ms, gap_ms)`` pairs. A turn is skipped when the caller
+    started speaking again before the agent answered, since that gap measures the
+    caller's pause rather than the agent.
     """
     ordered = sorted(events, key=lambda ev: ev.t_ms)
-    gaps: list[float] = []
+    gaps: list[tuple[float, float]] = []
     for i, ev in enumerate(ordered):
         if ev.side != "caller" or ev.kind != "speech_end":
             continue
@@ -51,9 +52,14 @@ def _time_to_first_audio(events: list[CallEvent]) -> list[float]:
             if later.side == "caller" and later.kind == "speech_start":
                 break
             if later.side == "agent" and later.kind == "audio_start":
-                gaps.append(later.t_ms - ev.t_ms)
+                gaps.append((ev.t_ms, later.t_ms - ev.t_ms))
                 break
     return gaps
+
+
+def _time_to_first_audio(events: list[CallEvent]) -> list[float]:
+    """Return just the gap lengths of ``ttfa_gaps``, in milliseconds."""
+    return [gap for _, gap in ttfa_gaps(events)]
 
 
 def _turns(events: list[CallEvent], side: str) -> int:

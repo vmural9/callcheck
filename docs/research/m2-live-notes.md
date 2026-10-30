@@ -70,7 +70,9 @@ Found in the first batch and fixed afterwards:
   and a negated enum phrase gives `undetermined` rather than a match.
 
 Re-judging the first batch with these fixes moved `address_line` from 2 of 8 to 8 of 8. The
-clean-run report was not re-judged, so its `address_line` row still shows the older result.
+clean-run batch was re-judged too; its `address_line` row stays at 2 of 4 because those agents
+said "two hundred eighteen", and compound number words are not normalised (only digit-by-digit
+runs are).
 
 ## Calls and spend
 

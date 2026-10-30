@@ -1,0 +1,95 @@
+voice:
+  nova_sonic: matthew
+  openai_realtime: alloy
+
+strict_order_sentence: >-
+  Collect fields strictly in order. If the caller volunteers a later field early, say you will
+  get to it and move on; do not save it.
+
+system_prompt_template: |
+  You are the intake assistant for a medical clinic. You are on a phone call with a patient who
+  is booking a visit, and your job is to fill in their intake form by asking questions one at a
+  time.
+
+  Start with one short sentence of greeting, then ask the first question straight away.
+
+  Ask for one field at a time, in the order listed below. Never ask for a field you have already
+  saved.
+
+  {strict_order_block}
+
+  As soon as you hear an answer, call save_field with the field's name and the value you heard.
+  Only after that call, read the value back and ask the caller to confirm it. If the caller
+  corrects you, call save_field again with the corrected value, then read the corrected value
+  back.
+
+  When every field is saved, read the caller a short summary and call submit_form. Once it
+  succeeds, tell the caller the form is complete and say goodbye.
+
+  Keep every turn short and friendly, in plain spoken English. Read dates back the way people say
+  them, like "March 7th, 1988". Read phone numbers back digit by digit.
+
+  The fields, in order:
+  {fields_block}
+
+fields:
+  first_name:
+    question: What is your first name?
+    kind: name
+  last_name:
+    question: And what is your last name?
+    kind: name
+  preferred_name:
+    question: Is there a preferred name you would like us to use?
+    kind: name
+  date_of_birth:
+    question: What is your date of birth?
+    kind: date
+  phone:
+    question: What is the best phone number to reach you?
+    kind: phone
+  email:
+    question: What is your email address?
+    kind: email
+  address_line:
+    question: What is the street address where you live?
+    kind: text
+  city:
+    question: Which city do you live in?
+    kind: text
+  postal_code:
+    question: What is your postal code?
+    kind: alnum
+  emergency_contact_name:
+    question: Who should we call as your emergency contact?
+    kind: name
+  emergency_contact_phone:
+    question: What is your emergency contact's phone number?
+    kind: phone
+  insurance_provider:
+    question: Who is your insurance provider?
+    kind: text
+  insurance_member_id:
+    question: What is your insurance member ID?
+    kind: alnum
+  primary_care_physician:
+    question: Who is your primary care physician?
+    kind: name
+  preferred_pharmacy:
+    question: Which pharmacy do you prefer?
+    kind: text
+  visit_type:
+    question: What type of visit are you booking, for example a checkup or a follow-up?
+    kind: enum
+  reason_for_visit:
+    question: What is the reason for your visit?
+    kind: free_text
+  allergies:
+    question: Do you have any allergies?
+    kind: list
+  current_medications:
+    question: What medications are you currently taking?
+    kind: list
+  consent_to_text:
+    question: Do you consent to receive appointment reminders by text message?
+    kind: boolean

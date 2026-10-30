@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from callcheck.adapters.callers.fake import FakeCaller
 from callcheck.adapters.fake_channel import FakeChannel
 from callcheck.adapters.targets.fake import FakeTarget
-from callcheck.core.audio import frame_bytes, rms_dbfs, tone
+from callcheck.core.audio import FRAME_MS, frame_bytes, rms_dbfs, tone
 from callcheck.core.call import Call, CallSettings
 from callcheck.core.clock import VirtualClock
 from callcheck.core.events import CallEvent, endpoint_event
@@ -24,6 +24,7 @@ class ListSink:
         self.frames = 0
         self.agent_audible_frames = 0
         self.first_audible_agent_frame: int | None = None
+        self.last_audible_agent_frame: int | None = None
         self.closes = 0
         self.closed_with: dict | None = None
 
@@ -35,6 +36,7 @@ class ListSink:
         """Count one frame, and count it as audible when the agent channel carries sound."""
         if rms_dbfs(right) > -60:
             self.agent_audible_frames += 1
+            self.last_audible_agent_frame = self.frames
             if self.first_audible_agent_frame is None:
                 self.first_audible_agent_frame = self.frames
         self.frames += 1
@@ -149,6 +151,22 @@ async def test_full_fake_call_ends_caller_done_and_records_both_channels():
     assert all(e.t_ms >= 0 for e in sink.events)
     speech = [e for e in sink.events if e.kind in ("speech_start", "speech_end")]
     assert speech and all(isinstance(e.payload["energy"], float) for e in speech)
+
+
+async def test_speech_end_is_stamped_at_the_first_silent_frame_not_the_vad_decision():
+    sink = ListSink()
+    await Call(
+        caller=ScriptedEndpoint([]),
+        target=ScriptedEndpoint(audio_frames("agent", 1000)),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=4),
+    ).run()
+    [end] = [e for e in sink.events if e.side == "agent" and e.kind == "speech_end"]
+    first_silent_ms = (sink.last_audible_agent_frame + 1) * FRAME_MS
+    # The VAD decides 25 quiet frames (500 ms) later; the stamp must be the speech boundary.
+    assert abs(end.t_ms - first_silent_ms) <= 2 * FRAME_MS
+    assert end.t_ms < first_silent_ms + 500 - 5 * FRAME_MS
 
 
 async def test_stalled_target_ends_with_watchdog_at_twice_stall():

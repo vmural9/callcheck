@@ -89,6 +89,11 @@ class EnergyVad:
         self._run = 0
         self.speaking = False
 
+    @property
+    def end_frames(self) -> int:
+        """Return how many consecutive quiet frames make an ``"end"`` transition."""
+        return self._end_frames
+
     def feed(self, pcm: bytes) -> Literal["start", "end"] | None:
         """Consume one frame; return ``"start"`` or ``"end"`` on a transition, else ``None``."""
         level = rms_dbfs(pcm)

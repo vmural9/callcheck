@@ -253,7 +253,20 @@ class Call:
             for side, lane in self._lanes.items()
         }
         for side, frame in recorded.items():
-            transition = self._lanes[side].vad.feed(frame)
-            if transition:
+            vad = self._lanes[side].vad
+            transition = vad.feed(frame)
+            if transition == "end":
+                # The VAD only decides after `end_frames` quiet frames; stamp the first of them,
+                # so latency is measured from when the speaker stopped, not from the decision.
+                hangover_ms = vad.end_frames * FRAME_MS
+                self._sink.record(
+                    CallEvent(
+                        max(0.0, self._now_ms() - hangover_ms),
+                        side,
+                        "speech_end",
+                        {"energy": rms_dbfs(frame)},
+                    )
+                )
+            elif transition:
                 self._record(side, f"speech_{transition}", energy=rms_dbfs(frame))
         self._sink.write_audio(recorded["caller"], recorded["agent"])

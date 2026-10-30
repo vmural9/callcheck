@@ -40,7 +40,6 @@ def load_reference_agent(
         if name not in spec["fields"]:
             raise KeyError(name)
     fields_block = "\n".join(f"- {n}: {spec['fields'][n]['question']}" for n in field_names)
-    order_key = "strict_order_sentence" if "strict_order" in bugs else "early_field_sentence"
     store = FormStore(field_names, {n: spec["fields"][n]["kind"] for n in field_names}, bugs)
     tools = [
         ToolSpec(
@@ -64,7 +63,7 @@ def load_reference_agent(
     return AgentDefinition(
         system_prompt=_tidy(
             spec["system_prompt_template"].format(
-                fields_block=fields_block, strict_order_block=spec[order_key]
+                fields_block=fields_block, order_block=spec["early_field_sentence"]
             )
         ),
         tools=tools,

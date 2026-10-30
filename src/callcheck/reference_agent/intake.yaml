@@ -2,11 +2,6 @@ voice:
   nova_sonic: matthew
   openai_realtime: alloy
 
-strict_order_sentence: >-
-  Collect fields strictly in order. If the caller volunteers a later field early, say you will
-  get to it and move on; do not save it. Treat any field the caller already mentioned as covered:
-  never ask for it again and never save it.
-
 early_field_sentence: >-
   If the caller gives you a later field before you ask for it, call save_field for it right away
   and skip that question when you reach it.
@@ -21,7 +16,7 @@ system_prompt_template: |
   Ask for one field at a time, in the order listed below. Never ask for a field you have already
   saved.
 
-  {strict_order_block}
+  {order_block}
 
   As soon as you hear an answer, call save_field with the field's name and the value you heard.
   Only after that call, read the value back exactly as the caller said it, and ask the caller to

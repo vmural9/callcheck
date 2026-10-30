@@ -83,13 +83,11 @@ async def test_snapshot_returns_a_copy():
     assert s.snapshot()["fields"]["phone"] == "415 555 0143"
 
 
-def test_loader_renders_fields_and_strict_order():
+def test_loader_renders_fields():
     a = load_reference_agent(["first_name", "phone"], frozenset({"strict_order"}))
-    assert "- first_name:" in a.system_prompt and "strictly in order" in a.system_prompt
+    assert "- first_name:" in a.system_prompt
     assert [t.name for t in a.tools] == ["save_field", "submit_form"]
     assert a.tools[0].input_schema["properties"]["name"]["enum"] == ["first_name", "phone"]
-    clean = load_reference_agent(["first_name"], frozenset())
-    assert "strictly in order" not in clean.system_prompt
 
 
 def test_loader_leaves_no_stray_blank_lines_or_placeholders():
@@ -120,24 +118,42 @@ def test_intake_yaml_has_twenty_fields_with_valid_kinds():
     assert all(f["kind"] in get_args(FieldType) and f["question"] for f in fields.values())
 
 
-def test_strict_order_replaces_the_early_field_sentence():
-    spec = yaml.safe_load(INTAKE_YAML.read_text())
-    clean = load_reference_agent(["first_name", "phone"], frozenset()).system_prompt
-    buggy = load_reference_agent(["first_name", "phone"], frozenset({"strict_order"})).system_prompt
-    assert spec["early_field_sentence"] in clean
-    assert spec["strict_order_sentence"] not in clean
-    assert spec["strict_order_sentence"] in buggy
-    assert spec["early_field_sentence"] not in buggy
-
-
 def test_prompt_tells_the_agent_to_read_back_the_callers_words():
     prompt = load_reference_agent(["phone"], frozenset()).system_prompt
     assert "exactly as the caller said it" in prompt
     assert "Never read back anything the tool returned" in prompt
 
 
-def test_strict_order_tells_the_agent_to_treat_volunteered_fields_as_covered():
-    buggy = load_reference_agent(["first_name"], frozenset({"strict_order"})).system_prompt
-    clean = load_reference_agent(["first_name"], frozenset()).system_prompt
-    assert "never ask for it again" in buggy
-    assert "never ask for it again" not in clean
+def _store(bugs):
+    return FormStore(["first_name", "last_name", "phone"], {}, frozenset(bugs))
+
+
+async def test_strict_order_drops_an_out_of_order_save_and_a_later_one():
+    s = _store({"strict_order"})
+    assert await s.execute("save_field", {"name": "phone", "value": "1"}) == {"ok": True}
+    await s.execute("save_field", {"name": "first_name", "value": "Ann"})
+    await s.execute("save_field", {"name": "last_name", "value": "Lee"})
+    await s.execute("save_field", {"name": "phone", "value": "2"})
+    assert s.snapshot()["fields"] == {"first_name": "Ann", "last_name": "Lee"}
+
+
+async def test_strict_order_stores_in_order_saves():
+    s = _store({"strict_order"})
+    for n in ("first_name", "last_name", "phone"):
+        await s.execute("save_field", {"name": n, "value": "x"})
+    await s.execute("save_field", {"name": "first_name", "value": "y"})
+    assert s.snapshot()["fields"] == {"first_name": "y", "last_name": "x", "phone": "x"}
+
+
+async def test_without_strict_order_an_out_of_order_save_is_stored():
+    s = _store(set())
+    await s.execute("save_field", {"name": "phone", "value": "1"})
+    assert s.snapshot()["fields"] == {"phone": "1"}
+
+
+def test_strict_order_does_not_change_the_prompt():
+    names = ["first_name", "phone"]
+    assert (
+        load_reference_agent(names, frozenset({"strict_order"})).system_prompt
+        == load_reference_agent(names, frozenset()).system_prompt
+    )

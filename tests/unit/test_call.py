@@ -23,6 +23,7 @@ class ListSink:
         self.events: list[CallEvent] = []
         self.frames = 0
         self.agent_audible_frames = 0
+        self.first_audible_agent_frame: int | None = None
         self.closes = 0
         self.closed_with: dict | None = None
 
@@ -32,9 +33,11 @@ class ListSink:
 
     def write_audio(self, left: bytes, right: bytes) -> None:
         """Count one frame, and count it as audible when the agent channel carries sound."""
-        self.frames += 1
         if rms_dbfs(right) > -60:
             self.agent_audible_frames += 1
+            if self.first_audible_agent_frame is None:
+                self.first_audible_agent_frame = self.frames
+        self.frames += 1
 
     def close(self, outcome: dict) -> None:
         """Keep the outcome and count the close."""
@@ -52,7 +55,7 @@ class ScriptedEndpoint:
         """Remember the events to emit once the call starts."""
         self._script = script
         self._queue: asyncio.Queue[CallEvent] = asyncio.Queue()
-        self._closed = False
+        self.closed = False
 
     async def start(self) -> None:
         """Queue the scripted events."""
@@ -72,8 +75,8 @@ class ScriptedEndpoint:
 
     async def close(self) -> None:
         """Queue ``closed`` once."""
-        if not self._closed:
-            self._closed = True
+        if not self.closed:
+            self.closed = True
             self._queue.put_nowait(endpoint_event("harness", "closed"))
 
     def result(self) -> dict | None:
@@ -83,6 +86,29 @@ class ScriptedEndpoint:
     async def nudge(self, instruction: str) -> bool:
         """Accept any nudge."""
         return True
+
+
+class SlowStartEndpoint(ScriptedEndpoint):
+    """Scripted endpoint whose connection takes ``connect_s`` seconds on the given clock."""
+
+    def __init__(self, script: list[CallEvent], clock: VirtualClock, connect_s: float) -> None:
+        """Remember the clock to advance and how long connecting takes."""
+        super().__init__(script)
+        self._clock = clock
+        self._connect_s = connect_s
+
+    async def start(self) -> None:
+        """Spend the connect time, then queue the scripted events."""
+        await self._clock.sleep_until(self._clock.now() + self._connect_s)
+        await super().start()
+
+
+class FailingCloseEndpoint(ScriptedEndpoint):
+    """Scripted endpoint whose ``close`` raises."""
+
+    async def close(self) -> None:
+        """Fail instead of closing."""
+        raise RuntimeError("close blew up")
 
 
 def audio_frames(side: str, ms: int) -> list[CallEvent]:
@@ -121,6 +147,8 @@ async def test_full_fake_call_ends_caller_done_and_records_both_channels():
     assert "speech_start" in kinds and "audio_start" in kinds and "result" in kinds
     assert "audio_out" not in kinds
     assert all(e.t_ms >= 0 for e in sink.events)
+    speech = [e for e in sink.events if e.kind in ("speech_start", "speech_end")]
+    assert speech and all(isinstance(e.payload["energy"], float) for e in speech)
 
 
 async def test_stalled_target_ends_with_watchdog_at_twice_stall():
@@ -224,3 +252,48 @@ async def test_playout_overflow_is_recorded_as_a_recoverable_error():
     overflow = [e for e in sink.events if e.kind == "error"]
     assert overflow and overflow[0].payload["message"] == "playout overflow"
     assert overflow[0].payload["dropped"] > 0
+
+
+async def test_connect_time_is_recorded_as_silence_so_audio_and_events_line_up():
+    clock = VirtualClock()
+    sink = ListSink()
+    await Call(
+        caller=ScriptedEndpoint([]),
+        target=SlowStartEndpoint(audio_frames("agent", 200), clock, connect_s=1.5),
+        sink=sink,
+        clock=clock,
+        settings=CallSettings(max_seconds=3),
+    ).run()
+    start = next(e for e in sink.events if e.kind == "audio_start")
+    first = sink.first_audible_agent_frame
+    assert first is not None and 75 <= first <= 77
+    assert abs(start.t_ms - first * 20) <= 20
+
+
+async def test_a_failing_close_does_not_stop_the_other_close_or_the_sink():
+    caller = FailingCloseEndpoint([])
+    target = ScriptedEndpoint([endpoint_event("agent", "closed")])
+    sink = ListSink()
+    outcome = await Call(
+        caller=caller, target=target, sink=sink, clock=VirtualClock(),
+        settings=CallSettings(max_seconds=60),
+    ).run()
+    assert outcome.reason == "target_closed"
+    assert target.closed
+    assert sink.closes == 1 and sink.closed_with["reason"] == "target_closed"
+    failures = [e for e in sink.events if e.kind == "error"]
+    assert failures and "close failed" in failures[0].payload["message"]
+
+
+async def test_long_burst_keeps_the_watchdog_quiet_while_it_plays_out():
+    sink = ListSink()
+    outcome = await Call(
+        caller=ScriptedEndpoint([]),
+        target=ScriptedEndpoint(audio_frames("agent", 10000)),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(stall_s=2, max_seconds=60),
+    ).run()
+    assert outcome.reason == "stalled"
+    assert 10000 + 3900 <= outcome.duration_ms <= 10000 + 4000 + 200
+    assert sink.agent_audible_frames >= 490

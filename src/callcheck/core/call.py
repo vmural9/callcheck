@@ -14,7 +14,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Literal
 
-from callcheck.core.audio import FRAME_MS, EnergyVad, Resampler, frame_bytes
+from callcheck.core.audio import FRAME_MS, EnergyVad, Resampler, frame_bytes, rms_dbfs, silence
 from callcheck.core.clock import Clock
 from callcheck.core.endpoints import Caller, TargetAgent, VoiceEndpoint
 from callcheck.core.events import CallEvent, Side, Sink
@@ -93,35 +93,55 @@ class Call:
             "agent": self._lane(speaker=target, listener=caller),
         }
         self._t0 = 0.0
-        self._last_audio_any = 0.0
+        self._last_activity = 0.0
         self._done_at: float | None = None
         self._ending: tuple[EndReason, str | None] | None = None
 
     async def run(self) -> CallOutcome:
         """Run the call to its end, close everything, and return the outcome."""
-        self._t0 = self._last_audio_any = self._clock.now()
+        self._t0 = self._last_activity = self._clock.now()
         consumers: list[asyncio.Task[None]] = []
         outcome: CallOutcome | None = None
         try:
             self._record("harness", "call_start")
             await self._target.start()
             await self._caller.start()
+            next_tick = self._write_connect_gap()
             consumers = [
                 asyncio.create_task(self._consume("agent")),
                 asyncio.create_task(self._consume("caller")),
             ]
-            outcome = await self._tick_until_end()
+            outcome = await self._tick_until_end(next_tick)
         except Exception as exc:
             self._record("harness", "error", message=str(exc), recoverable=False)
             outcome = self._conclude("error", str(exc))
         finally:
-            for task in consumers:
-                task.cancel()
-            await asyncio.gather(*consumers, return_exceptions=True)
-            await self._caller.close()
-            await self._target.close()
+            await self._shutdown(consumers)
             self._sink.close((outcome or self._conclude("error", "call cancelled")).as_dict())
         return outcome
+
+    async def _shutdown(self, consumers: list[asyncio.Task[None]]) -> None:
+        """Stop the consumers and close both endpoints, whatever any one close does."""
+        for task in consumers:
+            task.cancel()
+        await asyncio.gather(*consumers, return_exceptions=True)
+        for side, endpoint in self._endpoints.items():
+            try:
+                await endpoint.close()
+            except Exception as exc:
+                self._record(side, "error", message=f"close failed: {exc}", recoverable=True)
+
+    def _write_connect_gap(self) -> float:
+        """Record the time spent connecting as silence and return when the ticker resumes.
+
+        The recording starts at call start, so a frame's position in it equals the
+        ``t_ms`` of the events around it; the endpoints hear nothing until both are up.
+        """
+        frames = round((self._clock.now() - self._t0) / TICK_S)
+        gap = silence(self._settings.record_rate)
+        for _ in range(frames):
+            self._sink.write_audio(gap, gap)
+        return self._t0 + frames * TICK_S
 
     def _lane(self, *, speaker: VoiceEndpoint, listener: VoiceEndpoint) -> _Lane:
         """Build the lane for ``speaker``, whose audio is heard by ``listener``."""
@@ -185,15 +205,14 @@ class Call:
         gap_s = self._settings.audio_gap_ms / 1000
         if lane.last_audio_at is None or now - lane.last_audio_at >= gap_s:
             self._record(side, "audio_start")
-        lane.last_audio_at = self._last_audio_any = now
+        lane.last_audio_at = self._last_activity = now
         dropped = lane.playout.push(lane.to_listener.process(pcm))
         lane.recording.push(lane.to_record.process(pcm))
         if dropped:
             self._record("harness", "error", message="playout overflow", dropped=dropped)
 
-    async def _tick_until_end(self) -> CallOutcome:
-        """Mix one 20 ms frame per tick until something ends the call; return the outcome."""
-        next_tick = self._clock.now()
+    async def _tick_until_end(self, next_tick: float) -> CallOutcome:
+        """Mix one 20 ms frame per tick, starting after ``next_tick``, until the call ends."""
         while True:
             next_tick += TICK_S
             await self._clock.sleep_until(next_tick)
@@ -207,9 +226,11 @@ class Call:
         if self._ending:
             return self._conclude(*self._ending)
         now = self._clock.now()
+        if any(lane.playout.pending_ms > 0 for lane in self._lanes.values()):
+            self._last_activity = now
         if now - self._t0 >= self._settings.max_seconds:
             return self._conclude("max_duration")
-        if now - self._last_audio_any > 2 * self._settings.stall_s:
+        if now - self._last_activity > 2 * self._settings.stall_s:
             self._record("harness", "watchdog", reason="stalled")
             return self._conclude("stalled")
         if self._done_at is not None and self._finished_speaking(now):
@@ -234,5 +255,5 @@ class Call:
         for side, frame in recorded.items():
             transition = self._lanes[side].vad.feed(frame)
             if transition:
-                self._record(side, f"speech_{transition}")
+                self._record(side, f"speech_{transition}", energy=rms_dbfs(frame))
         self._sink.write_audio(recorded["caller"], recorded["agent"])

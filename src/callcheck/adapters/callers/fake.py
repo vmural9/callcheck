@@ -3,6 +3,8 @@
 ``FakeCaller`` listens for a question naming one of its fields, answers it, and says
 goodbye when the agent reports the form complete. A field listed in ``corrections``
 is first answered wrongly and then corrected ("415 555 0143, I mean 415 555 0134").
+With a ``script`` it instead speaks the next scripted line after each agent utterance
+and, once the lines run out, stays silent.
 """
 
 from callcheck.adapters.fake_channel import (
@@ -23,11 +25,16 @@ class FakeCaller(FakeEndpoint, Caller):
         answers: dict[str, str],
         *,
         corrections: dict[str, str] | None = None,
+        script: list[str] | None = None,
     ) -> None:
-        """Answer from ``answers``; for fields in ``corrections`` give that value first."""
+        """Answer from ``answers``; for fields in ``corrections`` give that value first.
+
+        When ``script`` is given, speak its lines in order instead of answering.
+        """
         super().__init__("caller", channel.to_caller, channel.to_agent, 440.0)
         self._answers = answers
         self._corrections = corrections or {}
+        self._script = None if script is None else list(script)
 
     async def nudge(self, instruction: str) -> bool:
         """Prompt the agent with "Hello?" whatever the instruction says; always accepted."""
@@ -36,6 +43,11 @@ class FakeCaller(FakeEndpoint, Caller):
 
     def _hear(self, text: str) -> None:
         """Answer the field the agent just asked about, or say goodbye once it is complete."""
+        self._emit("transcript", role="agent", text=text, final=True)
+        if self._script is not None:
+            if self._script:
+                self._speak(self._script.pop(0))
+            return
         lowered = text.lower()
         if "complete" in lowered:
             self._speak("Goodbye.")

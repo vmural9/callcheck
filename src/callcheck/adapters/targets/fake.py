@@ -3,7 +3,8 @@
 ``FakeTarget`` greets the caller, asks for each field in turn, and stores whatever
 the caller says. Behaviours let a test provoke the failures the harness must catch:
 ``ignore_correction`` keeps the first value of a self-correction, and
-``stall_after:<field>`` goes silent once that field is stored.
+``stall_after:<field>`` goes silent once that field is stored, and ``deaf`` never
+reports hearing the caller at all (it still greets).
 """
 
 from callcheck.adapters.fake_channel import (
@@ -42,7 +43,7 @@ class FakeTarget(FakeEndpoint, TargetAgent):
 
     def _hear(self, text: str) -> None:
         """Store the caller's answer to the current question, then ask the next or finish."""
-        if self._silenced:
+        if self._silenced or "deaf" in self._behaviours:
             return
         self._emit("heard_speech_end")
         self._emit("transcript", role="caller", text=text, final=True)

@@ -89,6 +89,63 @@ def test_partial_transcripts_do_not_decide_the_question():
     assert labels(detect(events)) == ["dead_end"]
 
 
+def test_caller_speech_after_agent_turn_end_is_not_counted_as_silence():
+    events = [
+        ev(1500, "caller", "speech_start"),
+        ev(1700, "agent", "turn_end"),
+        ev(4000, "caller", "speech_end"),
+        ev(12000, "harness", "call_end"),
+    ]
+    silences = [i for i in detect(events) if i.label in ("dead_end", "caller_stall")]
+    assert [i.t_ms for i in silences] == [4000]
+    short = [*events[:3], ev(5000, "harness", "call_end")]
+    assert [i for i in detect(short) if i.label in ("dead_end", "caller_stall")] == []
+
+
+def test_stale_question_from_a_previous_turn_does_not_make_a_caller_stall():
+    events = [
+        ev(500, "agent", "transcript", role="agent", text="Anything else?", final=True),
+        ev(1000, "agent", "turn_end"),
+        ev(3000, "agent", "audio_start"),
+        ev(4000, "agent", "turn_end"),
+        ev(14000, "harness", "call_end"),
+    ]
+    found = detect(events)
+    assert [(i.label, i.attribution, i.confidence, i.t_ms) for i in found] == [
+        ("dead_end", "unclear", "low", 4000)
+    ]
+
+
+def test_question_transcript_arriving_just_after_turn_end_still_counts():
+    events = [
+        ev(2000, "agent", "turn_end"),
+        ev(3000, "agent", "transcript", role="agent", text="Anything else?", final=True),
+        ev(12000, "harness", "call_end"),
+    ]
+    assert labels(detect(events)) == ["caller_stall"]
+
+
+def test_repeated_agent_turn_end_is_one_episode():
+    events = [
+        ev(1000, "agent", "audio_start"),
+        ev(2000, "agent", "turn_end"),
+        ev(2100, "agent", "turn_end"),
+        ev(12000, "harness", "call_end"),
+    ]
+    assert [i.t_ms for i in detect(events)] == [2000]
+
+
+def test_agent_already_speaking_when_caller_stops_is_not_slow():
+    events = [
+        ev(500, "agent", "speech_start"),
+        ev(1000, "caller", "speech_start"),
+        ev(1200, "caller", "speech_end"),
+        ev(7000, "agent", "audio_start"),
+        ev(8000, "agent", "speech_end"),
+    ]
+    assert "slow_response" not in labels(detect(events))
+
+
 def test_speech_inside_the_stall_window_prevents_an_episode():
     events = [
         ev(2000, "agent", "turn_end"),
@@ -254,6 +311,34 @@ def test_watchdog_without_prior_incident_emits_one_from_its_label():
     found = detect(events)
     assert [(i.label, i.attribution, i.ends_call) for i in found] == [
         ("caller_stall", "simulator", True)
+    ]
+
+
+def test_watchdog_prefers_the_incident_matching_its_label():
+    events = [
+        ev(1000, "agent", "turn_end"),
+        *caller_turn(8000, 9000),
+        ev(9500, "agent", "audio_start"),
+        ev(9600, "agent", "transcript", role="agent", text="Anything else?", final=True),
+        ev(10000, "agent", "turn_end"),
+        ev(30000, "harness", "watchdog", reason="max_nudges", label="dead_end"),
+    ]
+    found = detect(events)
+    assert [(i.label, i.t_ms, i.ends_call) for i in found] == [
+        ("dead_end", 1000, True),
+        ("caller_stall", 10000, False),
+    ]
+
+
+def test_watchdog_label_with_no_match_emits_instead_of_marking_another():
+    events = [
+        ev(2000, "agent", "turn_end"),
+        ev(12000, "harness", "watchdog", reason="max_nudges", label="caller_stall"),
+    ]
+    found = detect(events)
+    assert [(i.label, i.t_ms, i.ends_call) for i in found] == [
+        ("dead_end", 2000, False),
+        ("caller_stall", 12000, True),
     ]
 
 

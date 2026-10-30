@@ -39,6 +39,8 @@ Confidence = Literal["high", "medium", "low"]
 # than this inside the window just before the agent began.
 _EDGE_GAP_MS = 400.0
 _EDGE_WINDOW_MS = 2000.0
+# How long after an agent turn_end its final transcript may still arrive.
+_ASR_LAG_MS = 1500.0
 
 _NUDGE_LABELS: tuple[Label, ...] = ("no_response", "dead_end", "caller_stall", "caller_not_heard")
 _NUDGE_ENDINGS = ("max_nudges", "nudge_refused")
@@ -163,23 +165,48 @@ def _missed_turns(
     return found
 
 
-def _silences(events: list[CallEvent], config: CallConfig, horizon: float) -> list[Incident]:
-    """Find silences of at least ``stall_s`` after an agent ``turn_end``."""
-    found: list[Incident] = []
+def _agent_turn_ends(events: list[CallEvent]) -> list[tuple[float, float]]:
+    """Return ``(turn_end_t_ms, previous_turn_end_t_ms)`` for each distinct agent turn end.
+
+    A ``turn_end`` with no agent audio or speech since the previous one repeats it
+    and is dropped. The first turn has no predecessor, so its previous time is -inf.
+    """
+    ends: list[tuple[float, float]] = []
+    previous = float("-inf")
+    spoke = True
     for ev in events:
-        if ev.side != "agent" or ev.kind != "turn_end":
+        if ev.side != "agent":
             continue
+        if ev.kind in ("audio_start", "speech_start"):
+            spoke = True
+        elif ev.kind == "turn_end" and spoke:
+            ends.append((ev.t_ms, previous))
+            previous, spoke = ev.t_ms, False
+    return ends
+
+
+def _silences(
+    events: list[CallEvent], config: CallConfig, caller_spans: list[Interval], horizon: float
+) -> list[Incident]:
+    """Find silences of at least ``stall_s`` after an agent ``turn_end``.
+
+    The silence starts when the agent has stopped and any caller speech already
+    under way has finished.
+    """
+    found: list[Incident] = []
+    for turn_end, previous_end in _agent_turn_ends(events):
+        start = max([turn_end, *(end for s, end in caller_spans if s < turn_end < end)])
         end = min(
             (
                 e.t_ms
                 for e in events
-                if e.t_ms > ev.t_ms
+                if e.t_ms > start
                 and (e.kind == "speech_start" or (e.side == "agent" and e.kind == "audio_start"))
                 and e.side != "harness"
             ),
             default=horizon,
         )
-        if end - ev.t_ms < config.stall_s * 1000:
+        if end - start < config.stall_s * 1000:
             continue
         spoken = [
             e
@@ -188,14 +215,24 @@ def _silences(events: list[CallEvent], config: CallConfig, horizon: float) -> li
             and e.kind == "transcript"
             and e.payload.get("role") == "agent"
             and e.payload.get("final") is True
-            and e.t_ms <= ev.t_ms
+            and previous_end < e.t_ms <= turn_end + _ASR_LAG_MS
         ]
-        asked = bool(spoken) and str(spoken[-1].payload.get("text", "")).rstrip().endswith("?")
-        silent_s = (end - ev.t_ms) / 1000
-        if asked:
+        silent_s = (end - start) / 1000
+        if not spoken:
             found.append(
                 Incident(
-                    t_ms=ev.t_ms,
+                    t_ms=start,
+                    label="dead_end",
+                    attribution="unclear",
+                    confidence="low",
+                    reason=f"both sides were silent for {silent_s:.1f} s; the agent's last "
+                    "words were not transcribed, so whether it asked a question is unknown",
+                )
+            )
+        elif str(spoken[-1].payload.get("text", "")).rstrip().endswith("?"):
+            found.append(
+                Incident(
+                    t_ms=start,
                     label="caller_stall",
                     attribution="simulator",
                     confidence="high",
@@ -205,7 +242,7 @@ def _silences(events: list[CallEvent], config: CallConfig, horizon: float) -> li
         else:
             found.append(
                 Incident(
-                    t_ms=ev.t_ms,
+                    t_ms=start,
                     label="dead_end",
                     attribution="agent",
                     confidence="medium",
@@ -285,7 +322,9 @@ def _overlaps(
     return found
 
 
-def _slow_responses(events: list[CallEvent], config: CallConfig) -> list[Incident]:
+def _slow_responses(
+    events: list[CallEvent], config: CallConfig, agent_spans: list[Interval]
+) -> list[Incident]:
     """Find caller turns the agent answered slower than ``slow_response_s``."""
     return [
         Incident(
@@ -296,7 +335,7 @@ def _slow_responses(events: list[CallEvent], config: CallConfig) -> list[Inciden
             reason=f"the agent took {gap / 1000:.1f} s to start answering",
         )
         for t_ms, gap in ttfa_gaps(events)
-        if gap > config.slow_response_s * 1000
+        if gap > config.slow_response_s * 1000 and not _is_open(agent_spans, t_ms)
     ]
 
 
@@ -319,9 +358,10 @@ def _transport_errors(events: list[CallEvent]) -> list[Incident]:
 def _apply_watchdog_endings(events: list[CallEvent], incidents: list[Incident]) -> list[Incident]:
     """Mark the incident behind each nudge-driven ending as the one that ended the call.
 
-    The watchdog gives up after ``max_nudges`` or when the agent refuses a nudge; the
-    most recent silence incident before it is the cause. With none on record, the
-    incident is built from the watchdog payload's ``label``.
+    The watchdog gives up after ``max_nudges`` or when the agent refuses a nudge. The
+    cause is the latest incident before it carrying the payload's ``label`` (any
+    silence label when the payload names none). With no such incident, one is built
+    from the payload's ``label``.
     """
     incidents = sorted(incidents, key=lambda i: i.t_ms)
     for ev in events:
@@ -329,14 +369,13 @@ def _apply_watchdog_endings(events: list[CallEvent], incidents: list[Incident]) 
             continue
         if ev.payload.get("reason") not in _NUDGE_ENDINGS:
             continue
-        causes = [
-            n for n, i in enumerate(incidents) if i.label in _NUDGE_LABELS and i.t_ms <= ev.t_ms
-        ]
+        label = ev.payload.get("label")
+        wanted = (label,) if label in _NUDGE_LABELS else _NUDGE_LABELS
+        causes = [n for n, i in enumerate(incidents) if i.label in wanted and i.t_ms <= ev.t_ms]
         if causes:
             cause = causes[-1]
             incidents[cause] = incidents[cause].model_copy(update={"ends_call": True})
             continue
-        label = ev.payload.get("label")
         known = label in _NUDGE_LABELS
         incidents.append(
             Incident(
@@ -366,14 +405,14 @@ def detect_incidents(
     agent_spans = _agent_intervals(ordered, horizon)
     incidents = [
         *_missed_turns(ordered, config, agent_spans),
-        *_silences(ordered, config, horizon),
+        *_silences(ordered, config, caller_spans, horizon),
         *_overlaps(
             caller_spans,
             agent_spans,
             config,
             caller_interrupts_expected=caller_interrupts_expected,
         ),
-        *_slow_responses(ordered, config),
+        *_slow_responses(ordered, config, agent_spans),
         *_transport_errors(ordered),
     ]
     return _apply_watchdog_endings(ordered, incidents)
@@ -382,7 +421,6 @@ def detect_incidents(
 def write_incidents(run_dir: Path, incidents: list[Incident]) -> None:
     """Write ``incidents.json`` (a JSON list) into ``run_dir``."""
     rows = [incident.model_dump(mode="json") for incident in incidents]
-
     (run_dir / "incidents.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 

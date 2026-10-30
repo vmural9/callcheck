@@ -4,7 +4,8 @@
 goodbye when the agent reports the form complete. A field listed in ``corrections``
 is first answered wrongly and then corrected ("415 555 0143, I mean 415 555 0134").
 With a ``script`` it instead speaks the next scripted line after each agent utterance
-and, once the lines run out, stays silent.
+and, once the lines run out, stays silent. A nudge makes it say "Hello?", unless it
+was built with ``nudgeable=False``, when it refuses and stays quiet.
 """
 
 from callcheck.adapters.fake_channel import (
@@ -26,18 +27,23 @@ class FakeCaller(FakeEndpoint, Caller):
         *,
         corrections: dict[str, str] | None = None,
         script: list[str] | None = None,
+        nudgeable: bool = True,
     ) -> None:
         """Answer from ``answers``; for fields in ``corrections`` give that value first.
 
-        When ``script`` is given, speak its lines in order instead of answering.
+        When ``script`` is given, speak its lines in order instead of answering. With
+        ``nudgeable=False`` a nudge is refused.
         """
         super().__init__("caller", channel.to_caller, channel.to_agent, 440.0)
         self._answers = answers
         self._corrections = corrections or {}
         self._script = None if script is None else list(script)
+        self._nudgeable = nudgeable
 
     async def nudge(self, instruction: str) -> bool:
-        """Prompt the agent with "Hello?" whatever the instruction says; always accepted."""
+        """Prompt the agent with "Hello?" whatever the instruction says; refuse if not nudgeable."""
+        if not self._nudgeable:
+            return False
         self._speak("Hello?")
         return True
 

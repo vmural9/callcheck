@@ -10,6 +10,9 @@ from callcheck.core.audio import FRAME_MS, frame_bytes, rms_dbfs, tone
 from callcheck.core.call import Call, CallSettings
 from callcheck.core.clock import VirtualClock
 from callcheck.core.events import CallEvent, endpoint_event
+from callcheck.core.monitor import NUDGE_TEXT, TurnMonitor
+from callcheck.core.scenario import CallConfig
+from callcheck.core.turns import decisive_incident, detect_incidents
 
 ANSWERS = {"first_name": "Maria", "phone": "415 555 0134"}
 FIELDS = ["first_name", "phone"]
@@ -315,3 +318,154 @@ async def test_long_burst_keeps_the_watchdog_quiet_while_it_plays_out():
     assert outcome.reason == "stalled"
     assert 10000 + 3900 <= outcome.duration_ms <= 10000 + 4000 + 200
     assert sink.agent_audible_frames >= 490
+
+
+FORM_FIELDS = ["first_name", "last_name", "phone"]
+FORM_ANSWERS = {"first_name": "Maria", "last_name": "Lopez", "phone": "415 555 0134"}
+
+
+def nudging_call(
+    target_kwargs: dict, *, nudgeable: bool = True
+) -> tuple[Call, ListSink, FakeCaller]:
+    """Build a monitored call whose target is the fake form agent with ``target_kwargs``."""
+    channel = FakeChannel()
+    sink = ListSink()
+    caller = FakeCaller(channel, FORM_ANSWERS, nudgeable=nudgeable)
+    call = Call(
+        caller=caller,
+        target=FakeTarget(channel, FORM_FIELDS, **target_kwargs),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    )
+    return call, sink, caller
+
+
+def of_kind(sink: ListSink, kind: str) -> list[CallEvent]:
+    """Return the recorded events of one kind."""
+    return [e for e in sink.events if e.kind == kind]
+
+
+async def test_forced_stall_is_broken_by_nudge():
+    call, sink, _ = nudging_call({"go_silent_after": 2})
+    outcome = await call.run()
+    assert outcome.reason == "caller_done"
+    [nudge] = of_kind(sink, "nudge")
+    assert nudge.side == "harness" and nudge.payload == {"label": "no_response", "n": 1}
+    incidents = detect_incidents(sink.events, CallConfig(), caller_interrupts_expected=False)
+    missed = [i for i in incidents if i.label == "no_response"]
+    assert len(missed) == 1 and missed[0].attribution == "agent"
+    assert not any(e.kind == "watchdog" for e in sink.events)
+
+
+async def test_nudge_waits_for_nudge_after_s_of_silence():
+    call, sink, _ = nudging_call({"go_silent_after": 2})
+    await call.run()
+    [nudge] = of_kind(sink, "nudge")
+    last_answer = [
+        e
+        for e in sink.events
+        if e.side == "caller" and e.kind == "speech_end" and e.t_ms < nudge.t_ms
+    ][-1]
+    assert 8000 <= nudge.t_ms - last_answer.t_ms <= 8000 + 200
+
+
+async def test_max_nudges_ends_call():
+    call, sink, _ = nudging_call({"go_silent_after": 2, "wake_on_nudge": False})
+    outcome = await call.run()
+    assert outcome.reason == "stalled"
+    assert [e.payload["n"] for e in of_kind(sink, "nudge")] == [1, 2]
+    [dog] = of_kind(sink, "watchdog")
+    assert dog.payload == {"reason": "max_nudges", "label": "no_response"}
+    incidents = detect_incidents(sink.events, CallConfig(), caller_interrupts_expected=False)
+    decisive = decisive_incident(incidents)
+    assert decisive is not None and decisive.label == "no_response"
+
+
+async def test_nudge_refused_ends_call():
+    call, sink, _ = nudging_call({"go_silent_after": 2}, nudgeable=False)
+    outcome = await call.run()
+    assert outcome.reason == "stalled"
+    assert len(of_kind(sink, "nudge")) == 1
+    [dog] = of_kind(sink, "watchdog")
+    assert dog.payload == {"reason": "nudge_refused", "label": "no_response"}
+    incidents = detect_incidents(sink.events, CallConfig(), caller_interrupts_expected=False)
+    decisive = decisive_incident(incidents)
+    assert decisive is not None and decisive.label == "no_response"
+    assert decisive.attribution == "agent"
+
+
+async def test_the_nudge_instruction_reaches_the_caller():
+    call, _, caller = nudging_call({"go_silent_after": 2})
+    heard: list[str] = []
+    original = caller.nudge
+
+    async def spy(instruction: str) -> bool:
+        heard.append(instruction)
+        return await original(instruction)
+
+    caller.nudge = spy
+    await call.run()
+    assert heard == [NUDGE_TEXT]
+
+
+class SlowNudgeCaller(FakeCaller):
+    """Fake caller whose nudge waits until the mixer has made ``wait_frames`` more frames."""
+
+    def __init__(self, *args, sink: ListSink, wait_frames: int, **kwargs) -> None:
+        """Remember the sink to count frames on and how many frames to wait for."""
+        super().__init__(*args, **kwargs)
+        self._sink = sink
+        self._wait_frames = wait_frames
+        self.frames_during_nudge: int | None = None
+
+    async def nudge(self, instruction: str) -> bool:
+        """Yield to the mixer until enough frames passed, note the count, then speak."""
+        before = self._sink.frames
+        for _ in range(10 * self._wait_frames):
+            if self._sink.frames - before >= self._wait_frames:
+                break
+            await asyncio.sleep(0)
+        self.frames_during_nudge = self._sink.frames - before
+        return await super().nudge(instruction)
+
+
+async def test_a_slow_nudge_does_not_stall_the_mixer():
+    channel = FakeChannel()
+    sink = ListSink()
+    caller = SlowNudgeCaller(channel, FORM_ANSWERS, sink=sink, wait_frames=100)
+    outcome = await Call(
+        caller=caller,
+        target=FakeTarget(channel, FORM_FIELDS, go_silent_after=2),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    ).run()
+    assert outcome.reason == "caller_done"
+    assert len(of_kind(sink, "nudge")) == 1
+    # The ticker mixed 100 more frames (2 s of call time) while the nudge was still pending.
+    assert caller.frames_during_nudge == 100
+
+
+async def test_a_call_without_a_monitor_never_nudges():
+    call, sink = fake_call(CallSettings(stall_s=2, max_seconds=60), {"stall_after:first_name"})
+    outcome = await call.run()
+    assert outcome.reason == "stalled"
+    assert not of_kind(sink, "nudge")
+
+
+async def test_a_healthy_monitored_call_is_never_nudged():
+    channel = FakeChannel()
+    sink = ListSink()
+    outcome = await Call(
+        caller=FakeCaller(channel, FORM_ANSWERS),
+        target=FakeTarget(channel, FORM_FIELDS),
+        sink=sink,
+        clock=VirtualClock(),
+        settings=CallSettings(max_seconds=120),
+        monitor=TurnMonitor(CallConfig()),
+    ).run()
+    assert outcome.reason == "caller_done"
+    assert not of_kind(sink, "nudge") and not of_kind(sink, "watchdog")

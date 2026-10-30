@@ -4,7 +4,10 @@
 the caller says. Behaviours let a test provoke the failures the harness must catch:
 ``ignore_correction`` keeps the first value of a self-correction, and
 ``stall_after:<field>`` goes silent once that field is stored, and ``deaf`` never
-reports hearing the caller at all (it still greets).
+reports hearing the caller at all (it still greets). ``go_silent_after=N`` instead
+keeps hearing the caller but stops answering once N answers are stored; with
+``wake_on_nudge`` the next thing the caller says (a nudge) makes it ask again, without
+it the silence is permanent.
 """
 
 from callcheck.adapters.fake_channel import (
@@ -25,13 +28,21 @@ class FakeTarget(FakeEndpoint, TargetAgent):
         fields: list[str],
         *,
         behaviours: set[str] = frozenset(),
+        go_silent_after: int | None = None,
+        wake_on_nudge: bool = True,
     ) -> None:
-        """Ask for ``fields`` in order; ``behaviours`` selects the deliberate faults to show."""
+        """Ask for ``fields`` in order; ``behaviours`` selects the deliberate faults to show.
+
+        ``go_silent_after`` and ``wake_on_nudge`` script a silence the caller can break.
+        """
         super().__init__("agent", channel.to_agent, channel.to_caller, 660.0)
         self._fields = list(fields)
         self._behaviours = behaviours
         self._stored: dict[str, str] = {}
         self._silenced = False
+        self._go_silent_after = go_silent_after
+        self._wake_on_nudge = wake_on_nudge
+        self._asleep = False
 
     async def start(self) -> None:
         """Greet the caller and ask for the first field."""
@@ -47,6 +58,11 @@ class FakeTarget(FakeEndpoint, TargetAgent):
             return
         self._emit("heard_speech_end")
         self._emit("transcript", role="caller", text=text, final=True)
+        if self._asleep:
+            if self._wake_on_nudge:
+                self._asleep = False
+                self._say(self._question(self._fields[len(self._stored)]))
+            return
         field = self._fields[len(self._stored)]
         value = self._value_from(text)
         self._stored[field] = value
@@ -54,11 +70,21 @@ class FakeTarget(FakeEndpoint, TargetAgent):
         self._emit("tool_result", name="save_field", result={"ok": True})
         if f"stall_after:{field}" in self._behaviours:
             self._silenced = True
+        elif self._should_go_silent():
+            self._asleep = True
         elif len(self._stored) < len(self._fields):
             self._say(self._question(self._fields[len(self._stored)]))
         else:
             self._silenced = True
             self._say("Your form is complete. Goodbye.", finished=True)
+
+    def _should_go_silent(self) -> bool:
+        """Report whether this answer is the one after which the agent stops talking."""
+        return (
+            self._go_silent_after is not None
+            and len(self._stored) == self._go_silent_after
+            and len(self._stored) < len(self._fields)
+        )
 
     def _value_from(self, text: str) -> str:
         """Apply the self-correction rule: keep the corrected value unless told to ignore it."""

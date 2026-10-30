@@ -5,8 +5,9 @@ bursts and report events as they happen; the mixer paces the audio to real time 
 ticks, sends each side what the other said (silence when nothing is queued), watches both
 directions for speech, and records every event and every frame through a ``Sink``. It
 also decides when the call is over: the caller is done, the target closed, nobody has
-made a sound for too long, the time limit passed, or something broke. It does not judge
-the call or decide what is stored.
+made a sound for too long, the time limit passed, or something broke. With a
+``TurnMonitor`` it also nudges the caller to speak up when the call goes quiet, and gives
+up after the monitor's ``max_nudges``. It does not judge the call or decide what is stored.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ from callcheck.core.audio import FRAME_MS, EnergyVad, Resampler, frame_bytes, rm
 from callcheck.core.clock import Clock
 from callcheck.core.endpoints import Caller, TargetAgent, VoiceEndpoint
 from callcheck.core.events import CallEvent, Side, Sink
+from callcheck.core.monitor import NUDGE_TEXT, TurnMonitor
 from callcheck.core.playout import PlayoutBuffer
 
 TICK_S = FRAME_MS / 1000
@@ -76,10 +78,12 @@ class Call:
         sink: Sink,
         clock: Clock,
         settings: CallSettings | None = None,
+        monitor: TurnMonitor | None = None,
     ) -> None:
         """Bind the two endpoints, the sink that records the call, and the clock that paces it.
 
-        ``settings`` defaults to a fresh ``CallSettings()``.
+        ``settings`` defaults to a fresh ``CallSettings()``. With a ``monitor`` the mixer
+        nudges the caller when the monitor says the call has gone quiet.
         """
         settings = settings or CallSettings()
         self._caller = caller
@@ -87,6 +91,10 @@ class Call:
         self._sink = sink
         self._clock = clock
         self._settings = settings
+        self._monitor = monitor
+        self._nudges_sent = 0
+        self._nudge_task: asyncio.Task[bool] | None = None
+        self._nudge_label = ""
         self._endpoints: dict[Side, VoiceEndpoint] = {"caller": caller, "agent": target}
         self._lanes = {
             "caller": self._lane(speaker=caller, listener=target),
@@ -122,9 +130,10 @@ class Call:
 
     async def _shutdown(self, consumers: list[asyncio.Task[None]]) -> None:
         """Stop the consumers and close both endpoints, whatever any one close does."""
-        for task in consumers:
+        tasks = [*consumers, *([self._nudge_task] if self._nudge_task else [])]
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*consumers, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
         for side, endpoint in self._endpoints.items():
             try:
                 await endpoint.close()
@@ -159,7 +168,13 @@ class Call:
 
     def _record(self, side: Side, kind: str, **payload: object) -> None:
         """Stamp an event with the current call time and hand it to the sink."""
-        self._sink.record(CallEvent(self._now_ms(), side, kind, dict(payload)))
+        self._log(CallEvent(self._now_ms(), side, kind, dict(payload)))
+
+    def _log(self, ev: CallEvent) -> None:
+        """Hand an already stamped event to the sink and to the turn monitor."""
+        self._sink.record(ev)
+        if self._monitor:
+            self._monitor.observe(ev)
 
     def _conclude(self, reason: EndReason, error: str | None = None) -> CallOutcome:
         """Record ``call_end`` and build the outcome for a call that ended now."""
@@ -186,7 +201,7 @@ class Call:
         if ev.kind == "audio_out":
             self._take_audio(side, ev.payload["pcm"])
             return
-        self._sink.record(dataclasses.replace(ev, t_ms=self._now_ms()))
+        self._log(dataclasses.replace(ev, t_ms=self._now_ms()))
         if ev.kind == "interrupted":
             lane = self._lanes[side]
             lane.playout.flush()
@@ -228,6 +243,8 @@ class Call:
         now = self._clock.now()
         if any(lane.playout.pending_ms > 0 for lane in self._lanes.values()):
             self._last_activity = now
+            if self._monitor:
+                self._monitor.hold(self._now_ms())
         if now - self._t0 >= self._settings.max_seconds:
             return self._conclude("max_duration")
         if now - self._last_activity > 2 * self._settings.stall_s:
@@ -235,6 +252,36 @@ class Call:
             return self._conclude("stalled")
         if self._done_at is not None and self._finished_speaking(now):
             return self._conclude("caller_done")
+        return self._nudge_if_due(now)
+
+    def _nudge_if_due(self, now: float) -> CallOutcome | None:
+        """Nudge the caller when the monitor says the call is quiet; end the call when that fails.
+
+        The nudge runs as a task so a slow ``nudge()`` never holds up the 20 ms ticker;
+        each tick first looks at whether the one in flight has finished. A refused nudge,
+        or a quiet spell after ``max_nudges`` nudges, ends the call as ``stalled``.
+        """
+        if self._monitor is None or self._done_at is not None:
+            return None
+        if self._nudge_task is not None:
+            if not self._nudge_task.done():
+                return None
+            accepted = self._nudge_task.result()
+            self._nudge_task = None
+            if not accepted:
+                self._record("harness", "watchdog", reason="nudge_refused", label=self._nudge_label)
+                return self._conclude("stalled")
+        label = self._monitor.due(self._now_ms())
+        if label is None:
+            return None
+        if self._nudges_sent >= self._monitor.max_nudges:
+            self._record("harness", "watchdog", reason="max_nudges", label=label)
+            return self._conclude("stalled")
+        self._nudges_sent += 1
+        self._nudge_label = label
+        self._record("harness", "nudge", label=label, n=self._nudges_sent)
+        self._last_activity = now
+        self._nudge_task = asyncio.create_task(self._caller.nudge(NUDGE_TEXT))
         return None
 
     def _finished_speaking(self, now: float) -> bool:
@@ -259,7 +306,7 @@ class Call:
                 # The VAD only decides after `end_frames` quiet frames; stamp the first of them,
                 # so latency is measured from when the speaker stopped, not from the decision.
                 hangover_ms = vad.end_frames * FRAME_MS
-                self._sink.record(
+                self._log(
                     CallEvent(
                         max(0.0, self._now_ms() - hangover_ms),
                         side,

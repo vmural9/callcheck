@@ -34,6 +34,18 @@ def test_ttfa_skips_a_turn_the_caller_interrupted():
     assert m.ttfa_ms == [800]
 
 
+def test_ttfa_skips_a_turn_that_ended_while_the_agent_was_speaking():
+    evs = [
+        CallEvent(1000, "caller", "speech_start", {}),
+        CallEvent(1500, "agent", "audio_start", {}),
+        CallEvent(2000, "caller", "speech_end", {}),
+        CallEvent(2600, "agent", "audio_start", {}),
+        CallEvent(3000, "agent", "turn_end", {}),
+    ]
+    m = compute_metrics(evs, {"duration_ms": 3500})
+    assert m.ttfa_ms == [] and m.ttfa_max_ms is None
+
+
 def test_no_agent_audio_leaves_latencies_empty():
     m = compute_metrics([CallEvent(100, "caller", "speech_end", {})], {"duration_ms": 500})
     assert m.greeting_latency_ms is None and m.ttfa_ms == []
@@ -86,8 +98,10 @@ def test_p50_is_nearest_rank_so_it_agrees_with_the_batch_report():
     evs = [
         CallEvent(1000, "caller", "speech_end", {}),
         CallEvent(1100, "agent", "audio_start", {}),
+        CallEvent(1600, "agent", "speech_end", {}),
         CallEvent(2000, "caller", "speech_end", {}),
         CallEvent(2200, "agent", "audio_start", {}),
+        CallEvent(2700, "agent", "speech_end", {}),
     ]
     m = compute_metrics(evs, {"duration_ms": 3000})
     assert m.ttfa_ms == [100, 200] and m.ttfa_p50_ms == percentile(m.ttfa_ms, 50) == 100

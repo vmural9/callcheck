@@ -17,6 +17,8 @@ from callcheck.core.cost import Cost, cost_of
 from callcheck.core.events import CallEvent
 from callcheck.core.recorder import read_events
 
+Interval = tuple[float, float]
+
 
 class Metrics(BaseModel):
     """Latency and turn counts for one call; times are in milliseconds."""
@@ -48,17 +50,47 @@ def _greeting_latency(events: list[CallEvent]) -> float | None:
     return min(starts) if starts else None
 
 
+def agent_intervals(events: list[CallEvent], horizon: float) -> list[Interval]:
+    """Return the spans of agent speech.
+
+    A span opens on the agent's ``audio_start`` or ``speech_start`` (whichever comes
+    first) and closes on its ``speech_end`` or ``turn_end``. Bursts of audio inside
+    one utterance therefore make one span.
+    """
+    spans: list[Interval] = []
+    start: float | None = None
+    for ev in events:
+        if ev.side != "agent":
+            continue
+        if ev.kind in ("audio_start", "speech_start") and start is None:
+            start = ev.t_ms
+        elif ev.kind in ("speech_end", "turn_end") and start is not None:
+            spans.append((start, max(start, ev.t_ms)))
+            start = None
+    if start is not None:
+        spans.append((start, max(start, horizon)))
+    return spans
+
+
+def is_open(spans: list[Interval], t_ms: float) -> bool:
+    """Say whether ``t_ms`` lies strictly inside one of ``spans``."""
+    return any(start < t_ms < end for start, end in spans)
+
+
 def ttfa_gaps(events: list[CallEvent]) -> list[tuple[float, float]]:
     """Measure, for each caller turn, the gap from its end to the agent's next audio.
 
     Returns ``(speech_end_t_ms, gap_ms)`` pairs. A turn is skipped when the caller
     started speaking again before the agent answered, since that gap measures the
-    caller's pause rather than the agent.
+    caller's pause rather than the agent. It is also skipped when the agent was already
+    speaking as the caller's speech ended (the agent talked over the caller), so there was
+    no wait for an answer.
     """
     ordered = sorted(events, key=lambda ev: ev.t_ms)
+    agent_spans = agent_intervals(ordered, ordered[-1].t_ms if ordered else 0.0)
     gaps: list[tuple[float, float]] = []
     for i, ev in enumerate(ordered):
-        if ev.side != "caller" or ev.kind != "speech_end":
+        if ev.side != "caller" or ev.kind != "speech_end" or is_open(agent_spans, ev.t_ms):
             continue
         for later in ordered[i + 1 :]:
             if later.side == "caller" and later.kind == "speech_start":

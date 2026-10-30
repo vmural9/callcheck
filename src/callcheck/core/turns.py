@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from callcheck.core.events import CallEvent
-from callcheck.core.metrics import ttfa_gaps
+from callcheck.core.metrics import Interval, agent_intervals, is_open, ttfa_gaps
 from callcheck.core.scenario import CallConfig
 
 Label = Literal[
@@ -51,8 +51,6 @@ _NUDGE_ATTRIBUTION: dict[str, Attribution] = {
     "caller_not_heard": "simulator",
 }
 
-Interval = tuple[float, float]
-
 
 class Incident(BaseModel):
     """One turn-taking fault, with who caused it and how sure the rule is."""
@@ -82,33 +80,6 @@ def _caller_intervals(events: list[CallEvent], horizon: float) -> list[Interval]
     return spans
 
 
-def _agent_intervals(events: list[CallEvent], horizon: float) -> list[Interval]:
-    """Return the spans of agent speech.
-
-    A span opens on the agent's ``audio_start`` or ``speech_start`` (whichever comes
-    first) and closes on its ``speech_end`` or ``turn_end``. Bursts of audio inside
-    one utterance therefore make one span.
-    """
-    spans: list[Interval] = []
-    start: float | None = None
-    for ev in events:
-        if ev.side != "agent":
-            continue
-        if ev.kind in ("audio_start", "speech_start") and start is None:
-            start = ev.t_ms
-        elif ev.kind in ("speech_end", "turn_end") and start is not None:
-            spans.append((start, max(start, ev.t_ms)))
-            start = None
-    if start is not None:
-        spans.append((start, max(start, horizon)))
-    return spans
-
-
-def _is_open(spans: list[Interval], t_ms: float) -> bool:
-    """Say whether ``t_ms`` lies strictly inside one of ``spans``."""
-    return any(start < t_ms < end for start, end in spans)
-
-
 def _missed_turns(
     events: list[CallEvent], config: CallConfig, agent_spans: list[Interval]
 ) -> list[Incident]:
@@ -125,7 +96,7 @@ def _missed_turns(
             continue  # the caller resumed, so this was a pause, not the end of a turn
         if any(ev.t_ms < t < deadline for t in call_ends):
             continue  # the call ended before the agent's window had run out
-        if _is_open(agent_spans, ev.t_ms) or any(
+        if is_open(agent_spans, ev.t_ms) or any(
             e.side == "agent" and e.kind == "audio_start" and ev.t_ms <= e.t_ms <= deadline
             for e in events
         ):
@@ -306,7 +277,7 @@ def _overlaps(
     """Find interruptions and talking over each other."""
     found: list[Incident] = []
     for a_start, _ in agent_spans:
-        if not _is_open(caller_spans, a_start):
+        if not is_open(caller_spans, a_start):
             continue
         near_edge = any(
             q_start - p_end > _EDGE_GAP_MS
@@ -335,7 +306,7 @@ def _overlaps(
                 )
             )
     for c_start, _ in caller_spans:
-        if _is_open(agent_spans, c_start):
+        if is_open(agent_spans, c_start):
             found.append(
                 Incident(
                     t_ms=c_start,
@@ -366,9 +337,7 @@ def _overlaps(
     return found
 
 
-def _slow_responses(
-    events: list[CallEvent], config: CallConfig, agent_spans: list[Interval]
-) -> list[Incident]:
+def _slow_responses(events: list[CallEvent], config: CallConfig) -> list[Incident]:
     """Find caller turns the agent answered slower than ``slow_response_s``."""
     return [
         Incident(
@@ -379,7 +348,7 @@ def _slow_responses(
             reason=f"the agent took {gap / 1000:.1f} s to start answering",
         )
         for t_ms, gap in ttfa_gaps(events)
-        if gap > config.slow_response_s * 1000 and not _is_open(agent_spans, t_ms)
+        if gap > config.slow_response_s * 1000
     ]
 
 
@@ -446,7 +415,7 @@ def detect_incidents(
     ordered = sorted(events, key=lambda ev: ev.t_ms)
     horizon = ordered[-1].t_ms if ordered else 0.0
     caller_spans = _caller_intervals(ordered, horizon)
-    agent_spans = _agent_intervals(ordered, horizon)
+    agent_spans = agent_intervals(ordered, horizon)
     incidents = [
         *_missed_turns(ordered, config, agent_spans),
         *_silences(ordered, config, caller_spans, horizon),
@@ -456,7 +425,7 @@ def detect_incidents(
             config,
             caller_interrupts_expected=caller_interrupts_expected,
         ),
-        *_slow_responses(ordered, config, agent_spans),
+        *_slow_responses(ordered, config),
         *_transport_errors(ordered),
     ]
     return _apply_watchdog_endings(ordered, incidents)

@@ -35,10 +35,12 @@ def test_preflight_brief_is_a_fixed_script():
     assert "Do not call any tool." in b.system_prompt
 
 
-def test_spell_out_note_accepts_a_read_back_that_sounds_right():
+def test_spell_out_note_spells_once_then_accepts_the_read_back():
     # Live run 2026-10-30: the caller hears read-backs through speech recognition, which
     # cannot show spelling ("Okonkwo-Reyes" came back as "oconquo reyes"), so a rule to
-    # re-spell whenever the read-back is "wrong" looped for the rest of the call.
+    # re-spell whenever the read-back is "wrong" (or does not "sound right") looped for the
+    # rest of the call: the caller may spell once, then accepts the next read-back.
     b = build_brief(s, baseline, make_plan(s, baseline, 1))
-    assert "- last_name: Okonkwo-Reyes (spell it out" in b.system_prompt
-    assert "accept a read-back that sounds right" in b.system_prompt
+    assert "- last_name: Okonkwo-Reyes (if asked" in b.system_prompt
+    assert "spell it out letter by letter, but only once" in b.system_prompt
+    assert "accept the next read-back" in b.system_prompt

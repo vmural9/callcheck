@@ -10,9 +10,9 @@ from callcheck.core.endpoints import CallerBrief
 from callcheck.core.scenario import Persona, Scenario, VariationPlan, spoken_value
 
 _SPELL_OUT_NOTE = (
-    " (spell it out letter by letter if asked, or if it is read back sounding wrong; you hear"
-    " a read-back as sound, not letters, so once you have spelled it, accept a read-back that"
-    " sounds right)"
+    " (if asked, or if it is read back wrong, spell it out letter by letter, but only once:"
+    " you hear a read-back as sound, not letters, so after spelling it once, accept the next"
+    " read-back)"
 )
 
 _PREFLIGHT_PROMPT = (

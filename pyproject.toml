@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bedrock = ["boto3>=1.35", "aws-sdk-bedrock-runtime>=0.0.2"]
+bedrock = ["boto3>=1.35", "aws-sdk-bedrock-runtime[awscrt]>=0.12"]
 
 [project.scripts]
 callcheck = "callcheck.cli:app"
@@ -37,6 +37,7 @@ packages = ["src/callcheck"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = ["spikes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -269,8 +269,11 @@ sent), so that count is not audio duration. The usage event is the only cost dat
 
 Yes. After the system prompt and the open audio content, the text turn `(call connected)` sent
 at 3.0 s produced a greeting starting 0.54 s later: SPECULATIVE text "Hello, how can I help you
-today?", then 22 audio chunks (about 1.8 s). The AUDIO content was open but no audio frame had
-been sent yet. The 2.0 id (`amazon.nova-2-sonic-v1:0`) behaved the same ("Hello! Thanks for
+today?", then 22 audio chunks (about 1.8 s). The AUDIO content was open and no audio frame had
+been sent before the text turn, but the spike streamed silence frames from the moment it sent
+the turn. That matters: a later session (Task 15, 2026-10-30) sent the same turn and no audio,
+and the model answered nothing for 5 s, then greeted 0.5 s after the first 20 ms silence frame.
+The model answers a text turn only once input audio is flowing. The 2.0 id (`amazon.nova-2-sonic-v1:0`) behaved the same ("Hello! Thanks for
 calling. How can I help you today?"). Without a text turn the model said nothing in the 3 s
 that followed the system prompt in every session (seen in the first 3 s of each run; no
 separate no-text session was run, so a longer silence might behave differently).
@@ -348,7 +351,8 @@ Differences from the AWS sample code (written for an earlier release):
    silence frames while there is nothing to say: the server times out 55 s after the last
    client audio or interactive content, with a `ValidationException` on the output stream.
 4. To make the model speak first, send a USER text turn (`interactive:true`), e.g.
-   `(call connected)`, after the open handshake; it replied in about 0.5 s. A text turn in the
+   `(call connected)`, after the open handshake, and keep audio frames (silence will do)
+   flowing: it replied about 0.5 s after audio began, and not at all without audio. A text turn in the
    middle of a session works the same way.
 5. Read events by their single key under `event`. Build the transcript from `textOutput` by
    `role` of the owning `contentStart` (look it up by `contentId`); keep `FINAL` stage text for the

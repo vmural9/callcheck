@@ -27,13 +27,35 @@ _TRUE_WORDS = frozenset({"true", "yes", "y", "1"})
 _FALSE_WORDS = frozenset({"false", "no", "n", "0"})
 _LIST_SPLIT = re.compile(r",|\band\b", re.IGNORECASE)
 
+_HONORIFICS = {"doctor": "dr", "mister": "mr", "missus": "mrs"}
+_DIGIT_WORDS = {
+    "zero": "0",
+    "oh": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
+_DIGIT_RUN = re.compile(rf"\b(?:{'|'.join(_DIGIT_WORDS)})(?: (?:{'|'.join(_DIGIT_WORDS)}))+\b")
+
 Outcome = tuple[Verdict, str]
 Comparator = Callable[[FieldSpec, Any], Outcome]
 
 
 def normalize_text(s: str) -> str:
-    """Casefold ``s``, turn every non-alphanumeric run into one space, and strip."""
-    return re.sub(r"[\W_]+", " ", s.casefold()).strip()
+    """Casefold ``s``, turn every non-alphanumeric run into one space, and strip.
+
+    Then spell honorifics one way (``doctor`` becomes ``dr``) and turn a run of two or more
+    spoken digits (``two one eight``) into digits (``218``). A lone number word is untouched.
+    """
+    text = re.sub(r"[\W_]+", " ", s.casefold()).strip()
+    text = " ".join(_HONORIFICS.get(word, word) for word in text.split())
+    return _DIGIT_RUN.sub(lambda m: "".join(_DIGIT_WORDS[w] for w in m.group().split()), text)
 
 
 def normalize_phone(s: str) -> str:
@@ -146,13 +168,37 @@ def _compare_boolean(spec: FieldSpec, captured: Any) -> Outcome:
     return _equal(got == bool(spec.expected), f"boolean {bool(spec.expected)} vs {got}")
 
 
+def _phrase_in(phrase: str, text: str) -> bool:
+    """Report whether ``phrase`` appears in ``text`` as a whole-word phrase."""
+    return bool(phrase) and f" {phrase} " in f" {text} "
+
+
 def _compare_enum(spec: FieldSpec, captured: Any) -> Outcome:
-    """Match the captured value against the expected key or any of its synonyms."""
+    """Match the captured value against the expected key or any of its synonyms.
+
+    Failing an exact match, accept a captured value that contains exactly one option's
+    phrase (a synonym, or the key with underscores as spaces) as whole words. Phrases from
+    two different options stay a mismatch.
+    """
     key = str(spec.expected)
+    synonyms = spec.synonyms or {}
     accepted = {normalize_text(key)}
-    accepted.update(normalize_text(s) for s in (spec.synonyms or {}).get(key, []))
+    accepted.update(normalize_text(s) for s in synonyms.get(key, []))
     got = normalize_text(str(captured))
-    return _equal(got in accepted, f"{got!r} against {sorted(accepted)}")
+    if got in accepted:
+        return "match", f"{got!r} against {sorted(accepted)}"
+    found = []
+    for option in dict.fromkeys([key, *synonyms]):
+        phrases = {normalize_text(option)}
+        phrases.update(normalize_text(s) for s in synonyms.get(option, []))
+        if any(_phrase_in(p, got) for p in phrases):
+            found.append(option)
+    if len(found) == 1:
+        verdict = "match" if found[0] == key else "mismatch"
+        return verdict, f"{got!r} contains the phrase for {found[0]!r}"
+    if len(found) > 1:
+        return "mismatch", f"{got!r} contains phrases for both {found[0]!r} and {found[1]!r}"
+    return "mismatch", f"{got!r} against {sorted(accepted)}"
 
 
 def _compare_list(spec: FieldSpec, captured: Any) -> Outcome:

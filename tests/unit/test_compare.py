@@ -78,3 +78,38 @@ def test_partial_dates_are_undetermined_whatever_today_is():
     assert V(expected, "March 7th, 1988") == "match"
     note = compare_field(expected, "March 7th", "result").note
     assert "partial" in note and "'March 7th'" in note
+
+
+def test_doctor_matches_dr():
+    assert V(P("name", "Dr. Priya Nair"), "doctor priya nair") == "match"
+
+
+def test_spoken_digit_run_matches_digits():
+    assert V(P("text", "218 Valencia Street"), "two one eight valencia street") == "match"
+
+
+def test_single_number_word_untouched():
+    from callcheck.core.judge.compare import normalize_text
+
+    assert normalize_text("one way street") == "one way street"
+
+
+def _visit_type():
+    return P(
+        "enum",
+        "new_patient",
+        synonyms={
+            "new_patient": ["new patient", "first visit"],
+            "follow_up": ["follow up", "returning patient"],
+        },
+    )
+
+
+def test_enum_phrase_inside_capture():
+    assert V(_visit_type(), "new patient visit") == "match"
+
+
+def test_enum_two_options_stays_mismatch():
+    out = compare_field(_visit_type(), "new patient follow up", "result")
+    assert out.verdict == "mismatch"
+    assert "new_patient" in out.note and "follow_up" in out.note

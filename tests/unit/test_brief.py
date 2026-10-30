@@ -33,3 +33,12 @@ def test_preflight_brief_is_a_fixed_script():
     b = preflight_brief()
     assert b.persona_id == "preflight" and b.voice == {} and b.greeting_timeout_s == 8.0
     assert "Do not call any tool." in b.system_prompt
+
+
+def test_spell_out_note_accepts_a_read_back_that_sounds_right():
+    # Live run 2026-10-30: the caller hears read-backs through speech recognition, which
+    # cannot show spelling ("Okonkwo-Reyes" came back as "oconquo reyes"), so a rule to
+    # re-spell whenever the read-back is "wrong" looped for the rest of the call.
+    b = build_brief(s, baseline, make_plan(s, baseline, 1))
+    assert "- last_name: Okonkwo-Reyes (spell it out" in b.system_prompt
+    assert "accept a read-back that sounds right" in b.system_prompt

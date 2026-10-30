@@ -9,7 +9,11 @@ produce the same prompt. The preflight brief is a fixed script used to check the
 from callcheck.core.endpoints import CallerBrief
 from callcheck.core.scenario import Persona, Scenario, VariationPlan, spoken_value
 
-_SPELL_OUT_NOTE = " (spell it out letter by letter if asked, or if it is read back wrong)"
+_SPELL_OUT_NOTE = (
+    " (spell it out letter by letter if asked, or if it is read back sounding wrong; you hear"
+    " a read-back as sound, not letters, so once you have spelled it, accept a read-back that"
+    " sounds right)"
+)
 
 _PREFLIGHT_PROMPT = (
     "Wait for the other person to speak. Then say exactly: "

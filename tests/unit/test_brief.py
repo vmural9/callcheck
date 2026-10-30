@@ -68,7 +68,12 @@ def test_no_unscripted_corrections():
 def test_volunteer_section():
     text = _plan_brief(volunteer_early=["email"])
     assert "# Things to mention early\n" in text
-    assert "your email" in text and "maria.okonkwo@example.com" in text.split("# Things")[1]
+    section = text.split("# Things")[1]
+    assert "your email" in section and "maria.okonkwo@example.com" in section
+    assert (
+        "When you answer your phone, also give your email: maria.okonkwo@example.com, "
+        "in the same answer, before the agent asks for it."
+    ) in section
 
 
 def test_off_topic_section():

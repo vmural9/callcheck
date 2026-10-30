@@ -60,6 +60,23 @@ def _section(title: str, lines: list[str]) -> str:
     return "\n".join([f"# {title}", *lines, ""]) + "\n"
 
 
+def _volunteer_line(name: str, names: list[str], values: dict[str, str]) -> str:
+    """Say when to volunteer ``name``: with the answer to the field just before it.
+
+    The field before it in scenario order is asked first, so giving ``name`` alongside that
+    answer means the agent has not yet asked for it. A first field has nothing before it,
+    so it is brought up at the start.
+    """
+    index = names.index(name)
+    if index == 0:
+        return f"At the start, before the agent asks for it, give your {name}: {values[name]}."
+    previous = names[index - 1]
+    return (
+        f"When you answer your {previous}, also give your {name}: {values[name]}, in the same"
+        " answer, before the agent asks for it."
+    )
+
+
 def build_brief(scenario: Scenario, persona: Persona, plan: VariationPlan) -> CallerBrief:
     """Render the caller's system prompt from the scenario, persona and variation plan."""
     facts = [
@@ -71,11 +88,9 @@ def build_brief(scenario: Scenario, persona: Persona, plan: VariationPlan) -> Ca
         f"it back, say that was wrong and give '{c.final_value}'."
         for c in plan.corrections
     ] or ["None."]
+    names = [spec.name for spec in scenario.fields]
     values = {spec.name: spoken_value(spec) for spec in scenario.fields}
-    early = [
-        f"Before the agent asks for your {name}, bring it up yourself: {values[name]}."
-        for name in plan.volunteer_early
-    ] or ["None."]
+    early = [_volunteer_line(name, names, values) for name in plan.volunteer_early] or ["None."]
     off_topic = [
         f"After you answer your {q.after_field}, ask: '{q.question}'" for q in plan.off_topic
     ] or ["None."]

@@ -1,17 +1,33 @@
 # callcheck
 
 callcheck is an open-source evaluation harness for voice agents. A simulated caller, driven by a
-speech-to-speech model, places real calls to your agent over a streaming audio connection. Each
-call is recorded and transcribed with timestamps, a judge scores it against a written rubric with
-reasons, and a detector classifies turn-taking incidents as agent bugs or simulator artifacts.
+speech-to-speech model, places a real call to an agent over a streaming audio connection. The
+call is recorded and transcribed with timestamps, and a judge scores it against the scenario's
+written expectations and shows its reasons.
 
-**Status:** Milestone 1 complete: one real call end to end on Nova Sonic.
+**Status:** milestone 1 is done: one real call, end to end, on Nova Sonic. Today the agent under
+test is the bundled reference intake agent (with planted bugs) running on Nova Sonic, and the
+caller is Nova Sonic too. Planned next: a detector that tells agent bugs from simulator artifacts
+in turn-taking (milestone 2), then your own agents as targets and a parallel runner.
 
-Quickstart (coming):
+## Quickstart
+
+Needs Python 3.12, [uv](https://docs.astral.sh/uv/), and an AWS account with Amazon Bedrock model
+access for Nova Sonic and a Claude model (the judge) in `us-west-2`.
 
 ```
-callcheck run scenarios/intake_short.yaml --target nova-sonic --caller nova-sonic
+git clone <this repo> && cd callcheck
+uv sync --extra bedrock
+cp .env.example .env        # then set AWS_PROFILE (and AWS_REGION if not us-west-2)
+uv run callcheck preflight --target nova-sonic --caller nova-sonic
+uv run callcheck run scenarios/intake_short.yaml --target nova-sonic --caller nova-sonic \
+    --persona self_correcting
 ```
+
+`preflight` checks that the two sides can hear each other. `run` places the call, then writes a
+run folder under `runs/` holding `call.wav`, `transcript.jsonl`, `judge.json` and `report.md`, and
+prints the verdict. It exits 1 if a call crashed or judging failed, and 0 otherwise, so an agent
+that fails its scenario still exits 0. Live calls cost a few cents each.
 
 ## Sample report
 

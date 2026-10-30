@@ -8,11 +8,13 @@ run files.
 """
 
 import json
+import math
 import statistics
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from callcheck.core.cost import Cost, cost_of
 from callcheck.core.events import CallEvent
 from callcheck.core.recorder import read_events
 
@@ -23,11 +25,22 @@ class Metrics(BaseModel):
     greeting_latency_ms: float | None
     ttfa_ms: list[float]
     ttfa_p50_ms: float | None
+    ttfa_p90_ms: float | None = None
+    ttfa_p99_ms: float | None = None
     ttfa_max_ms: float | None
     duration_ms: float
     caller_turns: int
     agent_turns: int
-    cost_usd: None = None
+    cost: Cost | None = None
+
+
+def percentile(values: list[float], p: float) -> float | None:
+    """Return the nearest-rank ``p``th percentile of ``values``, or ``None`` if empty."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, math.ceil(p / 100 * len(ordered)))
+    return ordered[rank - 1]
 
 
 def _greeting_latency(events: list[CallEvent]) -> float | None:
@@ -74,6 +87,8 @@ def compute_metrics(events: list[CallEvent], outcome: dict) -> Metrics:
         greeting_latency_ms=_greeting_latency(events),
         ttfa_ms=gaps,
         ttfa_p50_ms=statistics.median(gaps) if gaps else None,
+        ttfa_p90_ms=percentile(gaps, 90),
+        ttfa_p99_ms=percentile(gaps, 99),
         ttfa_max_ms=max(gaps) if gaps else None,
         duration_ms=outcome["duration_ms"],
         caller_turns=_turns(events, "caller"),
@@ -81,9 +96,28 @@ def compute_metrics(events: list[CallEvent], outcome: dict) -> Metrics:
     )
 
 
-def write_metrics(run_dir: Path) -> Metrics:
-    """Compute metrics from ``events.jsonl`` and ``outcome.json`` and write ``metrics.json``."""
+def write_metrics(
+    run_dir: Path,
+    pricing: dict | None = None,
+    *,
+    agent_model: str = "nova-sonic",
+    caller_model: str = "nova-sonic",
+) -> Metrics:
+    """Compute metrics from the run's files and write ``metrics.json``.
+
+    With ``pricing``, the call is also priced from its ``usage`` events and the
+    usage listed in ``judge.json`` (if the judge has run).
+    """
     outcome = json.loads((run_dir / "outcome.json").read_text(encoding="utf-8"))
-    metrics = compute_metrics(read_events(run_dir), outcome)
+    events = read_events(run_dir)
+    metrics = compute_metrics(events, outcome)
+    if pricing is not None:
+        judge_path = run_dir / "judge.json"
+        judge_usage = []
+        if judge_path.exists():
+            judge_usage = json.loads(judge_path.read_text(encoding="utf-8")).get("usage", [])
+        metrics.cost = cost_of(
+            events, judge_usage, pricing, agent_model=agent_model, caller_model=caller_model
+        )
     (run_dir / "metrics.json").write_text(metrics.model_dump_json(indent=2), encoding="utf-8")
     return metrics

@@ -1,0 +1,27 @@
+# Prices in USD per 1,000 tokens. Rows marked unverified could not be confirmed
+# on the vendor's own page. A null price means the rate was not found; usage in
+# that unit is left out of the cost and the line is reported as partial.
+models:
+  nova-sonic:
+    checked: 2026-10-31
+    source: https://www.getmaxim.ai/bifrost/model-library/compare/bedrock/amazon.nova-2-5-sonic
+    unverified: true
+    per_1k_tokens:
+      speech_in: 0.003
+      speech_out: 0.012
+      text_in: null
+      text_out: null
+  bedrock:us.anthropic.claude-sonnet-5-5:
+    checked: 2026-10-31
+    source: https://platform.claude.com/docs/en/about-claude/pricing
+    unverified: true  # first-party price; Bedrock rate not confirmed
+    per_1k_tokens:
+      text_in: 0.002
+      text_out: 0.010
+  bedrock:us.anthropic.claude-haiku-5-5:
+    checked: 2026-10-31
+    source: https://platform.claude.com/docs/en/about-claude/pricing
+    unverified: true  # first-party price; Bedrock rate not confirmed
+    per_1k_tokens:
+      text_in: 0.0001
+      text_out: 0.0005

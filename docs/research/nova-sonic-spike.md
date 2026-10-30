@@ -5,9 +5,9 @@ Observed 2026-10-30 against the target account in us-west-2, with `spikes/nova_s
 written to `spikes/out/*.jsonl` (git-ignored, not committed). Everything below was seen on the
 wire unless it says "not observed". Timestamps are seconds since the session opened.
 
-Live budget: 8 sessions used (probe x2, tool x1, hears x2 [one synthesizer, one listener],
-bargein x2, model-id check x1). The first probe run lost its output to a bug in my receiver
-(output events name content by `contentId`, not `contentName`), so it is not counted as evidence.
+Evidence base: 8 live sessions (probe, tool, hears x2 [one synthesizer, one listener],
+bargein x2, model-id check, plus one probe run whose output was discarded because the
+receiver mis-keyed output events: they name content by `contentId`, not `contentName`).
 Every audio payload is elided as `"<b64>"` below.
 
 ## 1. Model id
@@ -18,14 +18,15 @@ Every audio payload is elided as `"<b64>"` below.
 |---|---|
 | `amazon.nova-2-5-sonic` | accepted, used for every observation below |
 | `amazon.nova-2-sonic-v1:0` | accepted (one short text-turn session; same event shapes, replied and ended normally) |
-| `amazon.nova-sonic-v1:0` | not tried: the first id in the brief's order was accepted |
+| `amazon.nova-sonic-v1:0` | not tried: ids were tried in the order above and the first was accepted |
 
 Chosen: `amazon.nova-2-5-sonic`, because it was first in the preference order and worked. The API
 reference lists only the v1 id as valid; that is out of date, the 2.x ids work. A rejected id was
-never seen, so its failure shape is not observed.
+never seen, so its failure shape is not observed: it is not known whether a rejection raises at
+the invoke call or on the first `receive()`.
 
-The operation takes the model id as a plain string; there is no region prefix or inference
-profile.
+A plain model id (no region prefix, no inference profile) was accepted as the `model_id`. Whether
+a regional or global inference-profile id is also accepted was not tried.
 
 ## 2. Event sequence (client to model)
 
@@ -69,9 +70,9 @@ Facts about the input side:
 
 - The server sends no acknowledgement to any input event (no ack for `sessionStart`,
   `promptStart`, content blocks). The first server event is a `usageEvent` about 0.8 s after
-  the system prompt (see 7). A bad model id or malformed event would surface as an exception on
-  the output stream; none occurred with the sequence above.
-- `audioInput` frames: I sent 512 samples (1024 bytes, 32 ms) at real-time pace. A text turn was
+  the system prompt (see 7). No error occurred with the sequence above; the failure
+  mode for a malformed event or bad model id was not observed.
+- `audioInput` frames: 512 samples (1024 bytes, 32 ms) at real-time pace. A text turn was
   accepted with no audio frames sent for the first 3 s of the session.
 - The audio `contentStart` was opened before any audio and kept open for the whole session; a
   single AUDIO content carried every utterance. Closing and reopening AUDIO contents between
@@ -121,13 +122,21 @@ Shapes:
   came as one TEXT content per pair; an uninterrupted multi-pair reply was not observed, so how
   its `FINAL` text is chunked is unknown.
 - User transcript: a TEXT content with `role: "USER"` and `generationStage` `FINAL` only (no
-  speculative user text). Its `contentEnd` has `stopReason: "PARTIAL_TURN"`. With an idle model the transcript
+  speculative user text). Observed (idle model, item 9; `role` is present on `contentStart`
+  and on `textOutput`, the stage only on `contentStart`):
+
+  ```json
+  {"contentStart":{"additionalModelFields":"{\"generationStage\":\"FINAL\"}","completionId":"…","contentId":"…","promptName":"…","role":"USER","sessionId":"…","textOutputConfiguration":{"mediaType":"text/plain"},"type":"TEXT"}}
+  {"textOutput":{"completionId":"…","content":"hello, can you hear me? testing one two three.","contentId":"…","promptName":"…","role":"USER","sessionId":"…"}}
+  {"contentEnd":{"completionId":"…","contentId":"…","promptName":"…","sessionId":"…","stopReason":"PARTIAL_TURN","type":"TEXT"}}
+  ```
+ Its `contentEnd` has `stopReason: "PARTIAL_TURN"`. With an idle model the transcript
   arrived 0.55 s after the speech audio ended (see 9).
 - `completionEnd` (`{completionId,promptName,sessionId,stopReason:"END_TURN"}`) was not seen
   after a normal turn; it appeared only after the client sent `promptEnd`/`sessionEnd` (see 6).
   Do not use it as a turn boundary. The turn boundary is the AUDIO `contentEnd` with
   `stopReason: "END_TURN"`.
-- Two more output events, not in the documentation I had: `userSpeechStart`
+- Two more output events, not in the AWS documentation reviewed beforehand: `userSpeechStart`
   `{inputAudioOffsetMs,promptName,sessionId}` and `userSpeechEnd`
   `{inputAudioDetectionOffsetMs,inputAudioOffsetMs,promptName,sessionId}`. The offsets are
   milliseconds on the client's input audio timeline.
@@ -154,7 +163,7 @@ System prompt asked the model to call `save_field` when it learned the first nam
 ```
 
 `toolUse.content` is a JSON string holding the tool arguments (here the model chose the argument
-names `name` and `value` of my schema: `name:"first_name"`, `value:"Maria"`). The tool call came
+names `name` and `value` of the test schema: `name:"first_name"`, `value:"Maria"`). The tool call came
 0.6 s after the text turn and before any speech. Result sent back (immediately after the
 `contentEnd`, 1 ms later):
 
@@ -223,7 +232,7 @@ close produced, 0.3 to 0.5 s later (every session that was closed cleanly, six o
 followed immediately by the receiver returning `None` (the smithy `receive()` returns `None`;
 no exception). This is the clean end signal.
 
-Idle for 60 s: after the last client input at 17.9 s I sent nothing. At 73.196 s (55.3 s after
+Idle for 60 s: after the last client input at 17.9 s the client sent nothing. At 73.196 s (55.3 s after
 the last input) the output stream raised, instead of a normal event:
 
 ```
@@ -239,7 +248,8 @@ session limit of 8 minutes was not tested.
 ## 7. `usageEvent`
 
 Sent unprompted, many times per session (10 to 33 per session), at the start (system prompt
-tokens), after each input and after each output block:
+tokens), after each recognised speech or text input and after each output block (the tone input
+of item 3 produced none):
 
 ```json
 {"usageEvent":{"completionId":"…","promptName":"…","sessionId":"…",
@@ -326,8 +336,11 @@ Differences from the AWS sample code (written for an earlier release):
 ## What the client must do
 
 1. Build the config as in item 10, with the CRT transport and the `bedrock` extra including
-   `awscrt`. Model id `amazon.nova-2-5-sonic` in us-west-2, from config, falling back to
-   `amazon.nova-2-sonic-v1:0` if the first is rejected.
+   `awscrt`. Model id `amazon.nova-2-5-sonic` in us-west-2, from config. Both it and
+   `amazon.nova-2-sonic-v1:0` were accepted, but a rejection was never observed, so the
+   client cannot yet say whether a bad id raises at the invoke call or on the first `receive()`.
+   If a fallback to the 2.0 id is wanted, catch both places; the spike's own detection (stream
+   ended before any event arrived) is a guess, not a verified signal.
 2. Open order: `sessionStart`, `promptStart` (with `toolConfiguration` if tools are used),
    SYSTEM text block, then the AUDIO `contentStart` held open for the whole session. Generate
    UUIDs for `promptName` and each `contentName`.
@@ -338,11 +351,16 @@ Differences from the AWS sample code (written for an earlier release):
    `(call connected)`, after the open handshake; it replied in about 0.5 s. A text turn in the
    middle of a session works the same way.
 5. Read events by their single key under `event`. Build the transcript from `textOutput` by
-   `role` of the owning `contentStart` (look it up by `contentId`); keep only `FINAL` stage text
-   for the transcript, and use the `SPECULATIVE` text if a live caption is wanted.
+   `role` of the owning `contentStart` (look it up by `contentId`); keep `FINAL` stage text for the
+   transcript, but drop any TEXT block whose `contentEnd` has `stopReason: "INTERRUPTED"` (it
+   holds the marker `{ "interrupted" : true }`, not speech). Use the `SPECULATIVE` text if a
+   live caption is wanted. USER content has only a `FINAL` stage.
 6. Decode `audioOutput.content` as 24 kHz PCM16 mono; chunk size varies (80 ms and 200 ms
    were seen). Treat AUDIO `contentEnd` with `stopReason` `END_TURN` as end of a reply;
-   `PARTIAL_TURN` means more audio follows. Do not wait for `completionEnd` between turns.
+   `PARTIAL_TURN` usually means more audio follows, but an interrupted reply also ends its
+   in-flight AUDIO content with `PARTIAL_TURN` and no more audio follows (see rule 8): do not
+   wait for `END_TURN` or further audio of an interrupted reply. Do not wait for `completionEnd`
+   between turns.
 7. Tool calls: on `toolUse` (key fields `toolName`, `toolUseId`, `content` = JSON string of the
    arguments), run the tool, then send a TOOL `contentStart` with `toolResultInputConfiguration
    {toolUseId,type:"TEXT",textInputConfiguration}`, a `toolResult` with a JSON string in

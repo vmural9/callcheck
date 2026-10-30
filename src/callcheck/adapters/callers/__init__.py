@@ -5,7 +5,10 @@ from typing import Any
 from callcheck.adapters.registry import build
 from callcheck.core.endpoints import Caller
 
-CALLERS: dict[str, str] = {"fake": "callcheck.adapters.callers.fake:FakeCaller"}
+CALLERS: dict[str, str] = {
+    "fake": "callcheck.adapters.callers.fake:FakeCaller",
+    "nova-sonic": "callcheck.adapters.callers.nova_sonic:NovaSonicCaller",
+}
 
 
 def make_caller(name: str, **kwargs: Any) -> Caller:

@@ -5,7 +5,10 @@ from typing import Any
 from callcheck.adapters.registry import build
 from callcheck.core.endpoints import TargetAgent
 
-TARGETS: dict[str, str] = {"fake": "callcheck.adapters.targets.fake:FakeTarget"}
+TARGETS: dict[str, str] = {
+    "fake": "callcheck.adapters.targets.fake:FakeTarget",
+    "nova-sonic": "callcheck.adapters.targets.nova_sonic:NovaSonicTarget",
+}
 
 
 def make_target(name: str, **kwargs: Any) -> TargetAgent:
